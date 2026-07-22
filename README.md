@@ -21,6 +21,12 @@ docker-compose.1panel.yml   1Panel 生产部署专用环境
 
 后端模块包括 `auth`、`users`、`items`、`warehouses`、`boms`、`inventory`、`stock-documents`、`production`、`dashboard` 和 `audit`。
 
+## 业务文档
+
+- [完整业务流程图](docs/business-process.md)：按角色说明基础数据、入库、生产领退料、分次报产、成品出库、冲销和追溯关系。
+- [全角色图文操作手册](docs/user-guide.md)：覆盖管理员、仓库管理员、生产人员的桌面端和手机端操作。
+- [可打印 Word 手册](docs/库存管理系统_业务流程与操作手册.docx)：业务流程图与操作说明合并版。
+
 ## Docker 一键启动
 
 ```bash
