@@ -1,0 +1,20 @@
+FROM node:22-alpine AS build
+RUN corepack enable
+WORKDIR /app
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml* ./
+COPY apps/api/package.json apps/api/package.json
+RUN pnpm install --filter @inventory/api... --frozen-lockfile=false
+COPY tsconfig.base.json ./
+COPY apps/api apps/api
+RUN pnpm --filter @inventory/api build
+
+FROM node:22-alpine
+RUN corepack enable
+WORKDIR /app
+COPY --from=build /app/package.json /app/pnpm-workspace.yaml ./
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/apps/api/package.json ./apps/api/package.json
+COPY --from=build /app/apps/api/node_modules ./apps/api/node_modules
+COPY --from=build /app/apps/api/dist ./apps/api/dist
+WORKDIR /app/apps/api
+CMD ["sh", "-c", "node dist/database/run-migrations.js && node dist/database/seed.js && node dist/main.js"]

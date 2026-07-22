@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: inventory_test
+          POSTGRES_USER: inventory
+          POSTGRES_PASSWORD: inventory_dev
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U inventory -d inventory_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm test
+      - run: pnpm build
+      - name: API E2E
+        run: pnpm test:e2e
+        env:
+          DATABASE_URL: postgresql://inventory:inventory_dev@localhost:5432/inventory_test

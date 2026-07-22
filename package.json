@@ -1,0 +1,14 @@
+{
+  "name": "inventory-management-mvp",
+  "private": true,
+  "packageManager": "pnpm@11.9.0",
+  "scripts": {
+    "dev": "pnpm --parallel --filter ./apps/* dev",
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "lint": "pnpm -r lint",
+    "db:migrate": "pnpm --filter @inventory/api migration:run",
+    "db:seed": "pnpm --filter @inventory/api seed",
+    "test:e2e": "pnpm --filter @inventory/api test:e2e"
+  }
+}

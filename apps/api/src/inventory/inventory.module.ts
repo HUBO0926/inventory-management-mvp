@@ -1,0 +1,2 @@
+import { Global,Module } from '@nestjs/common';import { InventoryPostingService } from './posting.service';import { InventoryController } from './inventory.controller';import { InventoryService } from './inventory.service';
+@Global() @Module({controllers:[InventoryController],providers:[InventoryPostingService,InventoryService],exports:[InventoryPostingService,InventoryService]})export class InventoryModule{}

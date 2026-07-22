@@ -1,0 +1,2 @@
+import { Controller,Get,Query } from '@nestjs/common';import { ApiTags } from '@nestjs/swagger';import { InventoryService } from './inventory.service';
+@ApiTags('库存') @Controller('inventory') export class InventoryController{constructor(private readonly service:InventoryService){}@Get('balances')balances(@Query()q:any){return this.service.balances(q);}@Get('transactions')transactions(@Query()q:any){return this.service.transactions(q);}}
