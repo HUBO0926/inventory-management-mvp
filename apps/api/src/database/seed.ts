@@ -12,31 +12,72 @@ export async function seedDatabase(db: DataSource, includeMasterData = true) {
     ['production', '生产人员', 'PRODUCTION'],
   ];
   for (const [username, name, role] of users) {
-    await db.query(`INSERT INTO users(username,name,password_hash,role) VALUES($1,$2,$3,$4)
-      ON CONFLICT(username) DO UPDATE SET name=EXCLUDED.name, role=EXCLUDED.role`, [username, name, passwordHash, role]);
+    await db.query(`INSERT INTO users(username,name,password_hash,role,role_id,employee_name)
+      SELECT $1,$2,$3,$4,id,$2 FROM roles WHERE code=$5
+      ON CONFLICT(username) DO UPDATE SET name=EXCLUDED.name,role=EXCLUDED.role,role_id=EXCLUDED.role_id,employee_name=EXCLUDED.employee_name`,
+      [username, name, passwordHash, role, role]);
   }
-  await db.query(`INSERT INTO warehouses(warehouse_code,name,warehouse_type) VALUES
-    ('RAW','原材料库','RAW'),('FG','成品库','FG') ON CONFLICT(warehouse_code) DO UPDATE SET name=EXCLUDED.name`);
+
+  if (await shouldInitialize(db, 'base_warehouses_v1', 'warehouses')) {
+    await db.query(`INSERT INTO warehouses(warehouse_code,name,display_name,warehouse_type) VALUES
+      ('RAW','原材料库','原材料库','RAW'),('FG','成品库','成品库','FG')
+      ON CONFLICT(warehouse_code) DO NOTHING`);
+    await db.query(`INSERT INTO warehouse_zones(warehouse_id,sequence_no,code,name,actual_location)
+      SELECT id,1,warehouse_code||'01','主库区','未填写' FROM warehouses
+      WHERE warehouse_code IN ('RAW','FG')
+      ON CONFLICT(warehouse_id,sequence_no) DO NOTHING`);
+    await db.query(`INSERT INTO warehouse_locations(warehouse_id,zone_id,code,name,system_default)
+      SELECT w.id,z.id,z.code||'-DEFAULT','内部默认库位',true FROM warehouses w
+      JOIN warehouse_zones z ON z.warehouse_id=w.id AND z.sequence_no=1
+      WHERE w.warehouse_code IN ('RAW','FG')
+      ON CONFLICT(warehouse_id,code) DO NOTHING`);
+    await markInitialized(db, 'base_warehouses_v1');
+  }
   if (!includeMasterData) return;
 
-  const items = [
-    ['M-001', '电机', 'MATERIAL', '个'], ['M-002', '外壳', 'MATERIAL', '个'],
-    ['M-003', '螺丝', 'MATERIAL', '个'], ['FG-001', '监测终端', 'FINISHED_GOOD', '台'],
-  ];
-  for (const row of items) {
-    await db.query(`INSERT INTO items(item_code,name,item_type,unit) VALUES($1,$2,$3,$4)
-      ON CONFLICT(item_code) DO UPDATE SET name=EXCLUDED.name, item_type=EXCLUDED.item_type, unit=EXCLUDED.unit`, row);
+  if (await shouldInitialize(db, 'demo_master_data_v1', 'items')) {
+    const items = [
+      ['M-001', '电机', 'MATERIAL', '个'], ['M-002', '外壳', 'MATERIAL', '个'],
+      ['M-003', '螺丝', 'MATERIAL', '个'], ['FG-001', '监测终端', 'FINISHED_GOOD', '台'],
+    ];
+    for (const row of items) {
+      await db.query(`INSERT INTO units(code,name) VALUES(upper(substr(md5($1),1,12)),$1) ON CONFLICT(code) DO NOTHING`, [row[3]]);
+      await db.query(`INSERT INTO items(item_code,name,item_type,unit,unit_id,category_id)
+        SELECT $1,$2,$3::varchar,$4::varchar,u.id,NULL FROM units u
+        WHERE u.name=$4::varchar
+        ON CONFLICT(item_code) DO NOTHING`, row);
+    }
+    const [fg] = await db.query(`SELECT id FROM items WHERE item_code='FG-001'`);
+    if (fg) {
+      let [bom] = await db.query(`SELECT id FROM boms WHERE finished_good_id=$1 AND version='V1' AND deleted_at IS NULL`, [fg.id]);
+      if (!bom) {
+        [bom] = await db.query(`INSERT INTO boms(finished_good_id,version,status,notes) VALUES($1,'V1','ACTIVE','MVP验收BOM') RETURNING id`, [fg.id]);
+      }
+      for (const [code, qty] of [['M-001', '1'], ['M-002', '1'], ['M-003', '4']]) {
+        const [material] = await db.query(`SELECT id FROM items WHERE item_code=$1`, [code]);
+        if (material) {
+          await db.query(`INSERT INTO bom_items(bom_id,material_id,qty_per) VALUES($1,$2,$3)
+            ON CONFLICT(bom_id,material_id) DO UPDATE SET qty_per=EXCLUDED.qty_per`, [bom.id, material.id, qty]);
+        }
+      }
+    }
+    await markInitialized(db, 'demo_master_data_v1');
   }
-  const [fg] = await db.query(`SELECT id FROM items WHERE item_code='FG-001'`);
-  let [bom] = await db.query(`SELECT id FROM boms WHERE finished_good_id=$1 AND version='V1'`, [fg.id]);
-  if (!bom) {
-    [bom] = await db.query(`INSERT INTO boms(finished_good_id,version,status,notes) VALUES($1,'V1','ACTIVE','MVP验收BOM') RETURNING id`, [fg.id]);
+}
+
+async function shouldInitialize(db: DataSource, key: string, table: string) {
+  const [state] = await db.query(`SELECT key FROM system_seed_state WHERE key=$1`, [key]);
+  if (state) return false;
+  const [{ count } = { count: 0 }] = await db.query(`SELECT count(*)::int count FROM ${table}`);
+  if (count > 0) {
+    await markInitialized(db, key);
+    return false;
   }
-  for (const [code, qty] of [['M-001', '1'], ['M-002', '1'], ['M-003', '4']]) {
-    const [material] = await db.query(`SELECT id FROM items WHERE item_code=$1`, [code]);
-    await db.query(`INSERT INTO bom_items(bom_id,material_id,qty_per) VALUES($1,$2,$3)
-      ON CONFLICT(bom_id,material_id) DO UPDATE SET qty_per=EXCLUDED.qty_per`, [bom.id, material.id, qty]);
-  }
+  return true;
+}
+
+async function markInitialized(db: DataSource, key: string) {
+  await db.query(`INSERT INTO system_seed_state(key) VALUES($1) ON CONFLICT(key) DO NOTHING`, [key]);
 }
 
 async function run() {

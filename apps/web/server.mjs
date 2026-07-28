@@ -8,7 +8,7 @@ const apiTarget = new URL(process.env.API_PROXY_TARGET || 'http://api:3001');
 
 createServer((request,response)=>{
   const pathname=decodeURIComponent((request.url||'/').split('?')[0]);
-  if(pathname==='/api'||pathname.startsWith('/api/')){
+  if(pathname==='/api'||pathname.startsWith('/api/')||pathname==='/uploads'||pathname.startsWith('/uploads/')){
     const upstream=proxyRequest({hostname:apiTarget.hostname,port:apiTarget.port||80,path:request.url,method:request.method,headers:{...request.headers,host:apiTarget.host}},upstreamResponse=>{
       response.writeHead(upstreamResponse.statusCode||502,upstreamResponse.headers);
       upstreamResponse.pipe(response);

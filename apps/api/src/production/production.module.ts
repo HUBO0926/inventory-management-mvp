@@ -1,2 +1,2 @@
-import { Module } from '@nestjs/common';import { ProductionController } from './production.controller';import { ProductionService } from './production.service';
-@Module({controllers:[ProductionController],providers:[ProductionService],exports:[ProductionService]})export class ProductionModule{}
+import { Module } from '@nestjs/common';import { ProductionController } from './production.controller';import { ProductionService } from './production.service';import { PickingOrdersController } from './picking-orders.controller';import { PickingOrdersService } from './picking-orders.service';
+@Module({controllers:[ProductionController,PickingOrdersController],providers:[ProductionService,PickingOrdersService],exports:[ProductionService,PickingOrdersService]})export class ProductionModule{}

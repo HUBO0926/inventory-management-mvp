@@ -16,37 +16,66 @@ import {
   TeamOutlined,
   ToolOutlined,
   UserOutlined,
+  SafetyCertificateOutlined,
+  EnvironmentOutlined,
+  TagsOutlined,
+  AuditOutlined,
+  BulbOutlined,
+  BellOutlined,
+  FileDoneOutlined,
 } from '@ant-design/icons';
-import { Avatar, Button, Card, Drawer, Dropdown, Form, Input, Layout, Menu, Space, Spin, Tag, Tooltip, Typography, message } from 'antd';
+import { Avatar, Badge, Button, Card, Drawer, Dropdown, Form, Input, Layout, Menu, Space, Spin, Tag, Tooltip, Typography, message } from 'antd';
 import type { MenuProps } from 'antd';
-import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
+import { Navigate, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { api } from './api';
 import { canAccessRole, statusText } from './domain';
 import { DashboardPage } from './dashboard';
-import { BomsPage, DocumentsPage, InventoryPage, ItemsPage, ProductionDetailPage, ProductionPage, TransactionsPage, UsersPage } from './pages';
+import { DocumentsPage, InventoryPage, ItemsPage, ProductionDetailPage, TransactionsPage, UsersPage } from './pages';
+import { BomsPage } from './bom-page';
+import { ProductionPage } from './production-list-page';
 import { useIsMobile } from './responsive';
+import { AuditPage, BatchesPage, InventoryV110Page, ItemsV110Page, LocationsPage, RolesPage, SimpleMasterPage, StockDocumentsV110Page, TransactionsV110Page, UsersV110Page, WarehousesPage } from './v110-pages';
+import { MaterialArchivePage, StockDocumentsPage } from './v110-pages';
+import { WarehouseVirtualMapPage } from './virtual-warehouse-page';
+import { WarehouseArchivePage } from './warehouse-archive-page';
+import { MaterialDetailPage, MaterialFormPage, MaterialListPage } from './material-pages';
+import { MaterialCategoriesPage } from './material-categories';
+import { ApprovalsPage } from './approvals-page';
+import { ProductionPickingPage } from './production-picking-page';
+import { InventoryManagementPage } from './inventory-management-page';
 
 const { Header, Sider, Content } = Layout;
 const { Title, Text } = Typography;
 
-export type User = { id: string; username: string; name: string; role: 'ADMIN' | 'WAREHOUSE' | 'PRODUCTION' };
+export type User = { id: string; username: string; name: string; employeeName?: string; department?: string; position?: string; role: string; roleId?: string; permissions?: string[] };
 export { statusText } from './domain';
 
-const roleText: Record<User['role'], string> = { ADMIN: '系统管理员', WAREHOUSE: '仓库管理员', PRODUCTION: '生产人员' };
+const roleText: Record<string, string> = { ADMIN: '系统管理员', WAREHOUSE: '仓库管理员', PRODUCTION: '生产人员' };
 
 export const routes = [
-  { key: '/', label: '库存驾驶舱', icon: <DashboardOutlined />, roles: ['ADMIN', 'WAREHOUSE', 'PRODUCTION'], group: 'cockpit' },
-  { key: '/items', label: '物料管理', icon: <AppstoreOutlined />, roles: ['ADMIN'], group: 'master' },
-  { key: '/boms', label: 'BOM 管理', icon: <ApartmentOutlined />, roles: ['ADMIN'], group: 'master' },
-  { key: '/inbound', label: '原材料入库', icon: <InboxOutlined />, roles: ['ADMIN', 'WAREHOUSE'], group: 'stock' },
-  { key: '/finished-inbound', label: '成品入库', icon: <ImportOutlined />, roles: ['ADMIN', 'WAREHOUSE'], group: 'stock' },
-  { key: '/outbound', label: '成品出库', icon: <SendOutlined />, roles: ['ADMIN', 'WAREHOUSE'], group: 'stock' },
-  { key: '/inventory', label: '当前库存', icon: <DatabaseOutlined />, roles: ['ADMIN', 'WAREHOUSE', 'PRODUCTION'], group: 'stock' },
-  { key: '/transactions', label: '库存流水', icon: <HistoryOutlined />, roles: ['ADMIN', 'WAREHOUSE', 'PRODUCTION'], group: 'stock' },
-  { key: '/production', label: '生产任务', icon: <ToolOutlined />, roles: ['ADMIN', 'WAREHOUSE', 'PRODUCTION'], group: 'production' },
-  { key: '/users', label: '账号管理', icon: <TeamOutlined />, roles: ['ADMIN'], group: 'system' },
+  { key: '/', label: '库存驾驶舱', icon: <DashboardOutlined />, roles: ['ADMIN', 'WAREHOUSE', 'PRODUCTION'], permission: 'stock.view', group: 'cockpit' },
+
+  // 库存中心
+  { key: '/warehouse-virtual', label: '虚拟仓库', icon: <DatabaseOutlined />, roles: ['ADMIN', 'WAREHOUSE', 'PRODUCTION'], permission: 'warehouse.virtual.view', group: 'stock' },
+  { key: '/approvals', label: '审核中心', icon: <FileDoneOutlined />, roles: ['ADMIN', 'WAREHOUSE', 'PRODUCTION'], permission: 'approval.view-own', group: 'stock' },
+  { key: '/inventory/management', label: '库存管理', icon: <InboxOutlined />, roles: ['ADMIN', 'WAREHOUSE', 'PRODUCTION'], permission: 'inventory.view', permissionsAny: ['stock.view', 'inventory.view', 'inventory.report.view'], group: 'stock' },
+
+  // 生产中心
+  { key: '/production/tasks', label: '生产任务', icon: <ToolOutlined />, roles: ['ADMIN', 'WAREHOUSE', 'PRODUCTION'], permission: 'production.view', group: 'production' },
+
+  // 资料中心
+  { key: '/materials/raw', label: '原材料档案', icon: <AppstoreOutlined />, roles: ['ADMIN', 'WAREHOUSE', 'PRODUCTION'], permission: 'item.view', group: 'master' },
+  { key: '/materials/finished', label: '成品档案', icon: <ImportOutlined />, roles: ['ADMIN', 'WAREHOUSE', 'PRODUCTION'], permission: 'item.view', group: 'master' },
+  { key: '/material-categories', label: '物料分类', icon: <TagsOutlined />, roles: ['ADMIN', 'WAREHOUSE', 'PRODUCTION'], permission: 'category.view', group: 'master' },
+  { key: '/boms', label: 'BOM档案', icon: <ApartmentOutlined />, roles: ['ADMIN'], permission: 'bom.view', group: 'master' },
+  { key: '/warehouse-archive', label: '仓储档案', icon: <EnvironmentOutlined />, roles: ['ADMIN'], permission: 'master.view', group: 'master' },
+
+  // 系统管理
+  { key: '/users', label: '账号管理', icon: <TeamOutlined />, roles: ['ADMIN'], permission: 'user.manage', group: 'system' },
+  { key: '/roles', label: '角色权限', icon: <SafetyCertificateOutlined />, roles: ['ADMIN'], permission: 'role.manage', group: 'system' },
+  { key: '/audit', label: '操作日志', icon: <AuditOutlined />, roles: ['ADMIN'], permission: 'audit.view', group: 'system' },
 ];
-export const visibleRouteKeysForRole = (role: User['role']) => routes.filter(route => canAccessRole(route.roles, role)).map(route => route.key);
+export const visibleRouteKeysForRole = (role: string) => routes.filter(route => canAccessRole(route.roles, role)).map(route => route.key);
 
 function Login({ onLogin }: { onLogin: (user: User) => void }) {
   const [loading, setLoading] = useState(false);
@@ -91,19 +120,57 @@ function Login({ onLogin }: { onLogin: (user: User) => void }) {
   );
 }
 
+function LegacyItemRedirect() {
+  const { id } = useParams();
+  return <Navigate to={id ? `/materials/${id}` : '/materials/raw'} replace />;
+}
+
+function LegacyInventoryRedirect({ tab }: { tab: 'documents' | 'flows' | 'reports' }) {
+  const location = useLocation();
+  const { id } = useParams();
+  const query = new URLSearchParams(location.search);
+  query.set('tab', tab);
+  if (id && tab === 'documents') query.set('documentId', id);
+  if (tab === 'reports' && !query.has('reportType')) query.set('reportType', 'current');
+  return <Navigate to={`/inventory/management?${query}`} replace />;
+}
+
+function LegacyProductionRedirect({ pending = false }: { pending?: boolean }) {
+  const location = useLocation();
+  const query = new URLSearchParams(location.search);
+  if (pending && !query.has('status')) query.set('status', 'pending');
+  return <Navigate to={`/production/tasks${query.size ? `?${query}` : ''}`} replace />;
+}
+
 function Shell({ user, onLogout }: { user: User; onLogout: () => void }) {
   const navigate = useNavigate();
   const location = useLocation();
   const mobile = useIsMobile();
   const [collapsed, setCollapsed] = useState(window.innerWidth < 1200);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-  const currentPath = location.pathname.startsWith('/production/') ? '/production' : location.pathname;
+  const [approvalCount, setApprovalCount] = useState(0);
+  const [systemVersion, setSystemVersion] = useState('');
+  const currentPath = location.pathname.startsWith('/production/tasks') ? '/production/tasks'
+    : location.pathname.startsWith('/inventory/management') ? '/inventory/management'
+      : location.pathname;
   const currentRoute = routes.find(route => route.key === currentPath);
   const visibleKeys = visibleRouteKeysForRole(user.role);
-  const visible = routes.filter(route => visibleKeys.includes(route.key));
+  const canOpen = (route: typeof routes[number]) => user.role === 'ADMIN'
+    || visibleKeys.includes(route.key)
+    || Boolean(route.permission && user.permissions?.includes(route.permission))
+    || Boolean('permissionsAny' in route && route.permissionsAny?.some(permission => user.permissions?.includes(permission)));
+  const visible = routes.filter(canOpen);
+  useEffect(() => { let alive=true; const refresh=async()=>{try{const s=await api('/approvals/statistics');if(alive)setApprovalCount(Number(s?.pendingMine||0));}catch{if(alive)setApprovalCount(0);}};void refresh();const timer=window.setInterval(refresh,60000);window.addEventListener('inventory:refresh',refresh);return()=>{alive=false;clearInterval(timer);window.removeEventListener('inventory:refresh',refresh);};},[user.id]);
   useEffect(() => {
-    if (currentRoute && !canAccessRole(currentRoute.roles, user.role)) navigate('/', { replace: true });
-  }, [currentRoute, navigate, user.role]);
+    let alive = true;
+    api('/system/version')
+      .then(data => { if (alive) setSystemVersion(String(data?.version || '')); })
+      .catch(() => { if (alive) setSystemVersion(''); });
+    return () => { alive = false; };
+  }, []);
+  useEffect(() => {
+    if (currentRoute && !canOpen(currentRoute)) navigate('/', { replace: true });
+  }, [currentRoute, navigate, user.role, user.permissions]);
 
   const groups = [
     { key: 'cockpit', label: '驾驶舱' },
@@ -113,11 +180,18 @@ function Shell({ user, onLogout }: { user: User; onLogout: () => void }) {
     { key: 'system', label: '系统管理' },
   ];
   const menuItems: MenuProps['items'] = groups.flatMap(group => {
-    const children = visible.filter(route => route.group === group.key).map(({ key, label, icon }) => ({ key, label, icon }));
+    const children = visible.filter(route => route.group === group.key).map(({ key, label, icon }) => ({
+      key,
+      label: key === '/approvals' && user.role !== 'PRODUCTION'
+        ? <Badge size="small" count={approvalCount} offset={[8, 0]}>{label}</Badge>
+        : label,
+      icon,
+      className: key === '/approvals' ? 'approval-menu-item' : undefined,
+    }));
     return children.length ? [{ type: 'group' as const, label: group.label, children }] : [];
   });
   const userMenu: MenuProps['items'] = [
-    { key: 'profile', label: `${user.name} · ${roleText[user.role]}`, disabled: true, icon: <UserOutlined /> },
+    { key: 'profile', label: `${user.name} · ${roleText[user.role] || user.role}`, disabled: true, icon: <UserOutlined /> },
     { type: 'divider' },
     { key: 'logout', label: '退出登录', icon: <LogoutOutlined />, danger: true },
   ];
@@ -157,8 +231,13 @@ function Shell({ user, onLogout }: { user: User; onLogout: () => void }) {
             </div>
           </Space>
           <Space size={10}>
-            <Tooltip title="刷新当前数据"><Button className="header-icon-button" type="text" icon={<ReloadOutlined />} onClick={() => window.dispatchEvent(new Event('inventory:refresh'))} /></Tooltip>
-            <Tag className="role-tag">{roleText[user.role]}</Tag>
+            <Tooltip title={systemVersion ? `系统版本 ${systemVersion}` : '版本信息暂不可用'}>
+              <Tag className="version-tag">{systemVersion ? `V${systemVersion.replace(/^v/i, '')}` : '版本未知'}</Tag>
+            </Tooltip>
+            <Tooltip title="刷新当前数据"><Button aria-label="刷新当前数据" className="header-icon-button" type="text" icon={<ReloadOutlined />} onClick={() => window.dispatchEvent(new Event('inventory:refresh'))} /></Tooltip>
+            <Tooltip title="切换浅色/深色主题"><Button aria-label="切换浅色/深色主题" className="header-icon-button" type="text" icon={<BulbOutlined />} onClick={() => window.dispatchEvent(new CustomEvent('inventory:theme-toggle'))} /></Tooltip>
+            <Tooltip title="待审核单据"><Badge count={user.role==='PRODUCTION'?0:approvalCount} size="small"><Button aria-label="待审核单据" className="header-icon-button" type="text" icon={<BellOutlined />} onClick={()=>navigate('/approvals')} /></Badge></Tooltip>
+            <Tag className="role-tag">{roleText[user.role] || user.role}</Tag>
             <Dropdown trigger={['click']} menu={{ items: userMenu, onClick: ({ key }) => key === 'logout' && onLogout() }} placement="bottomRight">
               <button className="user-trigger"><Avatar size={34} icon={<UserOutlined />} /><span>{user.name}</span></button>
             </Dropdown>
@@ -167,16 +246,47 @@ function Shell({ user, onLogout }: { user: User; onLogout: () => void }) {
         <Content className="app-content">
           <Routes>
             <Route path="/" element={<DashboardPage user={user} />} />
-            <Route path="/items" element={<ItemsPage user={user} />} />
-            <Route path="/boms" element={<BomsPage />} />
-            <Route path="/inbound" element={<DocumentsPage type="MATERIAL_INBOUND" />} />
-            <Route path="/finished-inbound" element={<DocumentsPage type="FINISHED_INBOUND" />} />
-            <Route path="/outbound" element={<DocumentsPage type="FINISHED_OUTBOUND" />} />
-            <Route path="/production" element={<ProductionPage user={user} />} />
-            <Route path="/production/:id" element={<ProductionDetailPage user={user} />} />
-            <Route path="/inventory" element={<InventoryPage />} />
-            <Route path="/transactions" element={<TransactionsPage />} />
-            <Route path="/users" element={<UsersPage />} />
+              <Route path="/warehouse-virtual" element={<WarehouseVirtualMapPage user={user} />} />
+              <Route path="/approvals" element={<ApprovalsPage user={user} />} />
+              <Route path="/inventory/management" element={<InventoryManagementPage user={user} />} />
+              <Route path="/stock-documents" element={<LegacyInventoryRedirect tab="documents" />} />
+              <Route path="/stock-documents/:id" element={<LegacyInventoryRedirect tab="documents" />} />
+              <Route path="/stock-transactions" element={<LegacyInventoryRedirect tab="flows" />} />
+              <Route path="/transactions" element={<LegacyInventoryRedirect tab="flows" />} />
+              <Route path="/stock-reports" element={<LegacyInventoryRedirect tab="reports" />} />
+              <Route path="/inventory" element={<LegacyInventoryRedirect tab="reports" />} />
+              <Route path="/shortage-todo" element={<LegacyProductionRedirect pending />} />
+              <Route path="/material-archive" element={<Navigate to="/materials/raw" replace />} />
+              <Route path="/warehouse-archive" element={<WarehouseArchivePage />} />
+              <Route path="/system-settings" element={<Navigate to="/" replace />} />
+            <Route path="/materials/raw" element={<MaterialListPage type="MATERIAL" user={user} />} />
+            <Route path="/materials/semi-finished" element={<Navigate to="/materials/raw" replace />} />
+            <Route path="/materials/finished" element={<MaterialListPage type="FINISHED_GOOD" user={user} />} />
+            <Route path="/materials/new" element={<MaterialFormPage user={user} />} />
+            <Route path="/materials/:id/edit" element={<MaterialFormPage user={user} />} />
+            <Route path="/materials/:id" element={<MaterialDetailPage user={user} />} />
+            <Route path="/items" element={<Navigate to="/materials/raw" replace />} />
+            <Route path="/items/:id" element={<LegacyItemRedirect />} />
+            <Route path="/material-categories" element={<MaterialCategoriesPage user={user} />} />
+            <Route path="/categories" element={<Navigate to="/material-categories" replace />} />
+            <Route path="/units" element={<SimpleMasterPage kind="units" />} />
+            <Route path="/warehouses" element={<WarehousesPage />} />
+            <Route path="/locations" element={<LocationsPage />} />
+            <Route path="/batches" element={<BatchesPage />} />
+            <Route path="/boms" element={<BomsPage user={user} />} />
+            <Route path="/inbound" element={<StockDocumentsV110Page type="MATERIAL_INBOUND" />} />
+            <Route path="/finished-inbound" element={<StockDocumentsV110Page type="FINISHED_INBOUND" />} />
+            <Route path="/outbound" element={<StockDocumentsV110Page type="FINISHED_OUTBOUND" />} />
+            <Route path="/adjustments" element={<StockDocumentsV110Page type="INVENTORY_ADJUSTMENT" />} />
+            <Route path="/moves" element={<StockDocumentsV110Page type="STOCK_MOVE" />} />
+            <Route path="/production" element={<LegacyProductionRedirect />} />
+            <Route path="/production/tasks" element={<ProductionPage user={user} />} />
+            <Route path="/production/tasks/:id" element={<ProductionPickingPage user={user} />} />
+            <Route path="/production/:id" element={<ProductionPickingPage user={user} />} />
+            <Route path="/users" element={<UsersV110Page />} />
+            <Route path="/roles" element={<RolesPage />} />
+            <Route path="/audit" element={<AuditPage />} />
+            <Route path="/about" element={<Navigate to="/" replace />} />
             <Route path="*" element={<Navigate to="/" />} />
           </Routes>
         </Content>

@@ -28,7 +28,7 @@ export class DashboardService {
             (SELECT count(*)::int FROM stock_documents WHERE posted_at>=CURRENT_DATE AND status IN ('POSTED','VOIDED')) AS "todayPostedDocumentCount"
           FROM items i
           JOIN warehouses w ON w.warehouse_code=CASE WHEN i.item_type='MATERIAL' THEN 'RAW' ELSE 'FG' END
-          LEFT JOIN stock_balances b ON b.warehouse_id=w.id AND b.item_id=i.id
+          LEFT JOIN (SELECT warehouse_id,item_id,sum(on_hand_qty) on_hand_qty FROM stock_balances GROUP BY warehouse_id,item_id) b ON b.warehouse_id=w.id AND b.item_id=i.id
           WHERE i.status='ACTIVE'
         `),
         this.db.query(`
@@ -38,7 +38,7 @@ export class DashboardService {
             count(*) FILTER (WHERE COALESCE(b.on_hand_qty,0)=0)::int "zeroSkuCount"
           FROM items i
           JOIN warehouses w ON w.warehouse_code=CASE WHEN i.item_type='MATERIAL' THEN 'RAW' ELSE 'FG' END
-          LEFT JOIN stock_balances b ON b.warehouse_id=w.id AND b.item_id=i.id
+          LEFT JOIN (SELECT warehouse_id,item_id,sum(on_hand_qty) on_hand_qty FROM stock_balances GROUP BY warehouse_id,item_id) b ON b.warehouse_id=w.id AND b.item_id=i.id
           WHERE i.status='ACTIVE' AND w.status='ACTIVE'
           GROUP BY w.warehouse_code,w.name ORDER BY w.warehouse_code DESC
         `),
@@ -51,6 +51,7 @@ export class DashboardService {
             count(sd.id) FILTER (WHERE sd.document_type='FINISHED_INBOUND')::int "finishedInboundDocumentCount",
             count(sd.id) FILTER (WHERE sd.document_type='FINISHED_OUTBOUND')::int "outboundDocumentCount",
             count(sd.id) FILTER (WHERE sd.document_type IN ('PRODUCTION_ISSUE','PRODUCTION_RETURN','PRODUCTION_COMPLETION'))::int "productionDocumentCount",
+            count(sd.id) FILTER (WHERE sd.document_type='INVENTORY_ADJUSTMENT')::int "adjustmentDocumentCount",
             count(sd.id) FILTER (WHERE sd.document_type='REVERSAL')::int "reversalDocumentCount"
           FROM dates LEFT JOIN stock_documents sd
             ON sd.posted_at>=dates.report_day AND sd.posted_at<dates.report_day+interval '1 day'
@@ -72,7 +73,7 @@ export class DashboardService {
             CASE WHEN COALESCE(b.on_hand_qty,0)=0 THEN 'ZERO' ELSE 'LOW' END "riskLevel"
           FROM items i
           JOIN warehouses w ON w.warehouse_code=CASE WHEN i.item_type='MATERIAL' THEN 'RAW' ELSE 'FG' END
-          LEFT JOIN stock_balances b ON b.warehouse_id=w.id AND b.item_id=i.id
+          LEFT JOIN (SELECT warehouse_id,item_id,sum(on_hand_qty) on_hand_qty FROM stock_balances GROUP BY warehouse_id,item_id) b ON b.warehouse_id=w.id AND b.item_id=i.id
           WHERE i.status='ACTIVE' AND (COALESCE(b.on_hand_qty,0)=0 OR COALESCE(b.on_hand_qty,0)<=i.minimum_stock)
           ORDER BY CASE WHEN COALESCE(b.on_hand_qty,0)=0 THEN 0 ELSE 1 END,
             CASE WHEN i.minimum_stock=0 THEN 0 ELSE COALESCE(b.on_hand_qty,0)/i.minimum_stock END,i.item_code

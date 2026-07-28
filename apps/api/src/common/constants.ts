@@ -6,6 +6,7 @@ export enum Role {
 
 export enum ItemType {
   MATERIAL = 'MATERIAL',
+  SEMI_FINISHED = 'SEMI_FINISHED',
   FINISHED_GOOD = 'FINISHED_GOOD',
 }
 
@@ -16,8 +17,12 @@ export enum EntityStatus {
 
 export enum DocumentStatus {
   DRAFT = 'DRAFT',
+  SUBMITTED = 'SUBMITTED',
+  APPROVED = 'APPROVED',
+  REJECTED = 'REJECTED',
   POSTED = 'POSTED',
   VOIDED = 'VOIDED',
+  CANCELLED = 'CANCELLED',
 }
 
 export enum DocumentType {
@@ -27,6 +32,9 @@ export enum DocumentType {
   PRODUCTION_RETURN = 'PRODUCTION_RETURN',
   PRODUCTION_COMPLETION = 'PRODUCTION_COMPLETION',
   FINISHED_OUTBOUND = 'FINISHED_OUTBOUND',
+  INVENTORY_ADJUSTMENT = 'INVENTORY_ADJUSTMENT',
+  STOCK_MOVE = 'STOCK_MOVE',
+  STOCK_CHECK = 'STOCK_CHECK',
   REVERSAL = 'REVERSAL',
 }
 
@@ -38,14 +46,23 @@ export enum Direction {
 export enum ProductionStatus {
   DRAFT = 'DRAFT',
   RELEASED = 'RELEASED',
+  AWAITING_ISSUE = 'AWAITING_ISSUE',
   IN_PROGRESS = 'IN_PROGRESS',
+  AWAITING_COMPLETION = 'AWAITING_COMPLETION',
   COMPLETED = 'COMPLETED',
+  CLOSED = 'CLOSED',
   CANCELLED = 'CANCELLED',
 }
 
 export interface AuthUser {
   id: string;
   username: string;
+  employeeName: string;
+  employeeNo?: string;
+  department?: string;
+  position?: string;
   name: string;
-  role: Role;
+  role: Role | string;
+  roleId?: string;
+  permissions?: string[];
 }

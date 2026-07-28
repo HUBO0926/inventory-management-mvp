@@ -19,7 +19,7 @@ export class ResponseInterceptor implements NestInterceptor {
     const request = context.switchToHttp().getRequest();
     request.requestId = request.headers['x-request-id'] || randomUUID();
     return next.handle().pipe(
-      map((data) => ({ code: 'OK', message: 'success', data, requestId: request.requestId })),
+      map((data) => ({ success:true,code: 'OK', message: 'success', data,details:null, requestId: request.requestId })),
     );
   }
 }
@@ -47,6 +47,7 @@ export class ApiExceptionFilter implements ExceptionFilter {
       }
     }
 
-    response.status(status).json({ code, message, data: details ?? null, requestId });
+    if(status===HttpStatus.INTERNAL_SERVER_ERROR)message='服务器内部错误';
+    response.status(status).json({ success:false,code, message, data:null,details:details??null, requestId });
   }
 }

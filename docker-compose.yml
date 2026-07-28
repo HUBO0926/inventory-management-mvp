@@ -1,6 +1,7 @@
 services:
   postgres:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_DB: inventory
       POSTGRES_USER: inventory
@@ -19,6 +20,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.api
+    restart: unless-stopped
     environment:
       NODE_ENV: development
       DATABASE_URL: postgresql://inventory:inventory_dev@postgres:5432/inventory
@@ -26,6 +28,9 @@ services:
       JWT_EXPIRES_IN: 8h
       INITIAL_DEMO_PASSWORD: ${INITIAL_DEMO_PASSWORD:-Demo@123456}
       API_PORT: 3001
+      UPLOAD_ROOT: /app/uploads
+    volumes:
+      - inventory_uploads:/app/uploads
     ports:
       - "127.0.0.1:3001:3001"
     depends_on:
@@ -43,6 +48,7 @@ services:
       dockerfile: Dockerfile.web
       args:
         VITE_API_URL: /api
+    restart: unless-stopped
     environment:
       API_PROXY_TARGET: http://api:3001
     ports:
@@ -73,5 +79,6 @@ services:
 
 volumes:
   inventory_postgres:
+  inventory_uploads:
   caddy_data:
   caddy_config:

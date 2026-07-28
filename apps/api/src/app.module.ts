@@ -2,7 +2,7 @@ import { Module } from '@nestjs/common';
 import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AuthModule } from './auth/auth.module';
-import { JwtAuthGuard, RolesGuard } from './auth/auth.guards';
+import { JwtAuthGuard, PermissionsGuard, RolesGuard } from './auth/auth.guards';
 import { ApiExceptionFilter, ResponseInterceptor } from './common/http';
 import { ItemsModule } from './items/items.module';
 import { WarehousesModule } from './warehouses/warehouses.module';
@@ -14,6 +14,10 @@ import { InventoryModule } from './inventory/inventory.module';
 import { StockDocumentsModule } from './stock-documents/stock-documents.module';
 import { ProductionModule } from './production/production.module';
 import { DashboardModule } from './dashboard/dashboard.module';
+import { MasterDataModule } from './master-data/master-data.module';
+import { SystemModule } from './system/system.module';
+import { AuditRequestInterceptor } from './audit/audit-request.interceptor';
+import { ApprovalsModule } from './approvals/approvals.module';
 
 @Module({
   imports:[
@@ -29,11 +33,11 @@ import { DashboardModule } from './dashboard/dashboard.module';
           synchronize: false,
           logging: process.env.DB_LOGGING === 'true',
         }),
-    AuditModule,AuthModule,UsersModule,ItemsModule,WarehousesModule,BomsModule,InventoryModule,StockDocumentsModule,ProductionModule,DashboardModule,
+    AuditModule,AuthModule,UsersModule,ItemsModule,WarehousesModule,BomsModule,InventoryModule,StockDocumentsModule,ProductionModule,DashboardModule,MasterDataModule,SystemModule,ApprovalsModule,
   ],
   controllers:[HealthController],
   providers:[
-    {provide:APP_GUARD,useClass:JwtAuthGuard},{provide:APP_GUARD,useClass:RolesGuard},
-    {provide:APP_INTERCEPTOR,useClass:ResponseInterceptor},{provide:APP_FILTER,useClass:ApiExceptionFilter},
+    {provide:APP_GUARD,useClass:JwtAuthGuard},{provide:APP_GUARD,useClass:RolesGuard},{provide:APP_GUARD,useClass:PermissionsGuard},
+    {provide:APP_INTERCEPTOR,useClass:ResponseInterceptor},{provide:APP_INTERCEPTOR,useClass:AuditRequestInterceptor},{provide:APP_FILTER,useClass:ApiExceptionFilter},
   ],
 }) export class AppModule {}
