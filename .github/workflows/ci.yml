@@ -2,6 +2,7 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
 
 permissions:
@@ -34,7 +35,7 @@ jobs:
       - name: Fresh database E2E
         run: pnpm test:e2e
         env:
-          DATABASE_URL: postgresql://inventory:inventory_dev@localhost:5432/inventory_test
+          E2E_DATABASE_URL: postgresql://inventory:inventory_dev@localhost:5432/inventory_test
           JWT_SECRET: ci-test-secret-ci-test-secret
       - name: V1.0.0 upgrade migration
         run: pnpm test:upgrade
