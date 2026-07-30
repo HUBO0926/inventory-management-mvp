@@ -123,7 +123,7 @@ export class BomsService {
       for (const line of dto.lines) {
         await qr.query(
           `INSERT INTO bom_items(id,bom_id,material_id,qty_per) VALUES($1,$2,$3,$4)`,
-          [randomUUID(), bomId, line.materialId, new Decimal(line.qtyPer).toFixed(4)],
+          [randomUUID(), bomId, line.materialId, new Decimal(line.qtyPer).toFixed(0)],
         );
       }
       await this.audit.log(userId, id ? 'UPDATE_BOM' : 'CREATE_BOM', 'boms', bomId!, dto, qr.manager);

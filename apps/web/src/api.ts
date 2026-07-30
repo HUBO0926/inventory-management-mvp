@@ -1,5 +1,6 @@
 export const API_BASE=import.meta.env.VITE_API_URL||'/api';
 export function token(){return localStorage.getItem('inventory_token')||'';}
+export class ApiError extends Error{status:number;constructor(message:string,status:number){super(message);this.name='ApiError';this.status=status;}}
 export async function api(path:string,options:RequestInit={}){
   const headers:any={...(options.headers||{})};
   if(options.body!==undefined&&!(options.body instanceof FormData)&&!headers['Content-Type'])headers['Content-Type']='application/json';
@@ -8,7 +9,7 @@ export async function api(path:string,options:RequestInit={}){
   try{response=await fetch(`${API_BASE}${path}`,{...options,headers});}
   catch{throw new Error('NETWORK_ERROR: 网络暂时不可用，请稍后重试');}
   const body=await response.json().catch(()=>({message:'服务响应异常'}));
-  if(!response.ok)throw new Error(body.message||'请求失败');
+  if(!response.ok)throw new ApiError(body.message||'请求失败',response.status);
   return body.data;
 }
 

@@ -160,7 +160,7 @@ export function ProductionPage({ user }: { user: User }) {
             />
           </Form.Item>
           <Form.Item label="计划数量" name="plannedQty" rules={[{ required: true }]}>
-            <InputNumber min={0.0001} precision={4} stringMode style={{ width: '100%' }} />
+            <InputNumber min={1} precision={0} stringMode style={{ width: '100%' }} />
           </Form.Item>
           <Form.Item label="默认领料仓库" name="defaultIssueWarehouseId">
             <Select allowClear placeholder="未选择时按仓库编码自动选择" options={warehouses.map(row=>({value:row.id,label:`${row.warehouseCode} ${row.name}`}))}/>

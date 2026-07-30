@@ -15,12 +15,12 @@ services:
       retries: 20
 
   api:
-    image: ghcr.io/hubo0926/inventory-management-mvp-api:${APP_VERSION:-1.2.0}
+    image: ghcr.io/hubo0926/inventory-management-mvp-api:${APP_VERSION:-1.3.0}
     restart: unless-stopped
     environment:
       NODE_ENV: production
       APP_ENV: production
-      APP_VERSION: ${APP_VERSION:-1.2.0}
+      APP_VERSION: ${APP_VERSION:-1.3.0}
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
       POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
@@ -43,7 +43,7 @@ services:
       retries: 20
 
   web:
-    image: ghcr.io/hubo0926/inventory-management-mvp-web:${APP_VERSION:-1.2.0}
+    image: ghcr.io/hubo0926/inventory-management-mvp-web:${APP_VERSION:-1.3.0}
     restart: unless-stopped
     environment:
       API_PROXY_TARGET: http://api:3001

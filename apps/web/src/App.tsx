@@ -30,12 +30,10 @@ import { Navigate, Route, Routes, useLocation, useNavigate, useParams } from 're
 import { api } from './api';
 import { canAccessRole, statusText } from './domain';
 import { DashboardPage } from './dashboard';
-import { DocumentsPage, InventoryPage, ItemsPage, ProductionDetailPage, TransactionsPage, UsersPage } from './pages';
 import { BomsPage } from './bom-page';
 import { ProductionPage } from './production-list-page';
 import { useIsMobile } from './responsive';
-import { AuditPage, BatchesPage, InventoryV110Page, ItemsV110Page, LocationsPage, RolesPage, SimpleMasterPage, StockDocumentsV110Page, TransactionsV110Page, UsersV110Page, WarehousesPage } from './v110-pages';
-import { MaterialArchivePage, StockDocumentsPage } from './v110-pages';
+import { AuditPage, BatchesPage, LocationsPage, RolesPage, SimpleMasterPage, StockDocumentsV110Page, UsersV110Page, WarehousesPage } from './v110-pages';
 import { WarehouseVirtualMapPage } from './virtual-warehouse-page';
 import { WarehouseArchivePage } from './warehouse-archive-page';
 import { MaterialDetailPage, MaterialFormPage, MaterialListPage } from './material-pages';
@@ -146,7 +144,10 @@ function Shell({ user, onLogout }: { user: User; onLogout: () => void }) {
   const navigate = useNavigate();
   const location = useLocation();
   const mobile = useIsMobile();
-  const [collapsed, setCollapsed] = useState(window.innerWidth < 1200);
+  const [collapsed, setCollapsed] = useState(() => {
+    const saved = localStorage.getItem('inventory_sidebar_collapsed');
+    return saved === null ? window.innerWidth < 1440 : saved === 'true';
+  });
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [approvalCount, setApprovalCount] = useState(0);
   const [systemVersion, setSystemVersion] = useState('');
@@ -167,6 +168,14 @@ function Shell({ user, onLogout }: { user: User; onLogout: () => void }) {
       .then(data => { if (alive) setSystemVersion(String(data?.version || '')); })
       .catch(() => { if (alive) setSystemVersion(''); });
     return () => { alive = false; };
+  }, []);
+  useEffect(() => {
+    const adapt = () => {
+      if (window.innerWidth < 768) return;
+      if (localStorage.getItem('inventory_sidebar_collapsed') === null) setCollapsed(window.innerWidth < 1440);
+    };
+    window.addEventListener('resize', adapt);
+    return () => window.removeEventListener('resize', adapt);
   }, []);
   useEffect(() => {
     if (currentRoute && !canOpen(currentRoute)) navigate('/', { replace: true });
@@ -196,6 +205,16 @@ function Shell({ user, onLogout }: { user: User; onLogout: () => void }) {
     { key: 'logout', label: '退出登录', icon: <LogoutOutlined />, danger: true },
   ];
   const openRoute = (key: string) => { navigate(key); setMobileMenuOpen(false); };
+  const toggleSidebar = () => {
+    if (mobile) {
+      setMobileMenuOpen(true);
+      return;
+    }
+    setCollapsed(value => {
+      localStorage.setItem('inventory_sidebar_collapsed', String(!value));
+      return !value;
+    });
+  };
   const navigation = (compact = false) => <>
     <div className="app-logo">
       <DatabaseOutlined />
@@ -212,9 +231,7 @@ function Shell({ user, onLogout }: { user: User; onLogout: () => void }) {
         collapsedWidth={72}
         collapsed={collapsed}
         className="app-sider"
-        breakpoint="xl"
         trigger={null}
-        onBreakpoint={broken => setCollapsed(broken)}
       >
         {navigation(collapsed)}
       </Sider>}
@@ -224,11 +241,8 @@ function Shell({ user, onLogout }: { user: User; onLogout: () => void }) {
       <Layout className={`app-main ${mobile ? 'app-main-mobile' : collapsed ? 'app-main-collapsed' : ''}`}>
         <Header className="app-header">
           <Space size={14}>
-            <Button className="header-icon-button" type="text" aria-label={mobile ? '打开导航' : collapsed ? '展开导航' : '折叠导航'} icon={mobile || collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />} onClick={() => mobile ? setMobileMenuOpen(true) : setCollapsed(value => !value)} />
-            <div className="header-title">
-              <Text type="secondary">库存管理系统</Text>
-              <Text strong>{currentRoute?.label || '业务详情'}</Text>
-            </div>
+            <Button className="header-icon-button" type="text" aria-label={mobile ? '打开导航' : collapsed ? '展开导航' : '折叠导航'} icon={mobile || collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />} onClick={toggleSidebar} />
+            <div className="header-breadcrumb"><Text type="secondary">运营中心</Text><span>/</span><Text strong>{currentRoute?.label || '业务详情'}</Text></div>
           </Space>
           <Space size={10}>
             <Tooltip title={systemVersion ? `系统版本 ${systemVersion}` : '版本信息暂不可用'}>

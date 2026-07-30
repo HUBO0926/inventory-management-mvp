@@ -7,7 +7,7 @@ async function run() {
   try {
     const differences = await db.query(`
       WITH ledger AS (
-        SELECT warehouse_id,location_id,item_id,batch_id,sum(delta_qty)::numeric(18,4) ledger_qty
+        SELECT warehouse_id,location_id,item_id,batch_id,sum(delta_qty)::numeric(18,0) ledger_qty
         FROM stock_transactions GROUP BY warehouse_id,location_id,item_id,batch_id
       )
       SELECT w.warehouse_code warehouse,loc.code location,i.item_code item,

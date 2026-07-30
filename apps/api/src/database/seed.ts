@@ -33,6 +33,19 @@ export async function seedDatabase(db: DataSource, includeMasterData = true) {
       ON CONFLICT(warehouse_id,code) DO NOTHING`);
     await markInitialized(db, 'base_warehouses_v1');
   }
+  // The defective warehouse is required by receipt approval and must also be
+  // created for databases whose original base-warehouse seed already ran.
+  await db.query(`INSERT INTO warehouses(warehouse_code,name,display_name,warehouse_type,status) VALUES
+    ('DEFECTIVE','不良品库','不良品库','DEFECTIVE','ACTIVE')
+    ON CONFLICT(warehouse_code) DO UPDATE SET warehouse_type='DEFECTIVE'`);
+  await db.query(`INSERT INTO warehouse_zones(warehouse_id,sequence_no,code,name,actual_location,status)
+    SELECT id,1,'DEFECTIVE01','主库区','未填写','ACTIVE' FROM warehouses WHERE warehouse_code='DEFECTIVE'
+    ON CONFLICT(warehouse_id,sequence_no) DO NOTHING`);
+  await db.query(`INSERT INTO warehouse_locations(warehouse_id,zone_id,code,name,system_default,status)
+    SELECT w.id,z.id,'DEFECTIVE01-DEFAULT','内部默认库位',true,'ACTIVE' FROM warehouses w
+    JOIN warehouse_zones z ON z.warehouse_id=w.id AND z.sequence_no=1
+    WHERE w.warehouse_code='DEFECTIVE'
+    ON CONFLICT(warehouse_id,code) DO NOTHING`);
   if (!includeMasterData) return;
 
   if (await shouldInitialize(db, 'demo_master_data_v1', 'items')) {

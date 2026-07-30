@@ -36,9 +36,9 @@ export class StockReservationService {
       if (available.lt(line.quantity)) {
         throw new BusinessException(
           'INSUFFICIENT_STOCK',
-          `${line.item_code} ${line.item_name} 可用库存不足：可用 ${available.toFixed(4)}，申请 ${new Decimal(line.quantity).toFixed(4)}`,
+          `${line.item_code} ${line.item_name} 可用库存不足：可用 ${available.toFixed(0)}，申请 ${new Decimal(line.quantity).toFixed(0)}`,
           HttpStatus.CONFLICT,
-          { itemId: line.item_id, locationId: line.location_id, availableQty: available.toFixed(4), requestQty: line.quantity },
+          { itemId: line.item_id, locationId: line.location_id, availableQty: available.toFixed(0), requestQty: line.quantity },
         );
       }
       await qr.query(

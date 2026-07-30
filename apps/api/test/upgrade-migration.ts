@@ -8,6 +8,14 @@ import { V110Refactor1750000000000 } from '../src/database/migrations/1750000000
 import { ItemArchiveImages1760000000000 } from '../src/database/migrations/1760000000000-ItemArchiveImages';
 import { ItemCategoryTypes1770000000000 } from '../src/database/migrations/1770000000000-ItemCategoryTypes';
 import { MasterDataFlexibility1780000000000 } from '../src/database/migrations/1780000000000-MasterDataFlexibility';
+import { DefectiveWarehouseAndMove1790000000000 } from '../src/database/migrations/1790000000000-DefectiveWarehouseAndMove';
+import { VirtualWarehousePermissions1800000000000 } from '../src/database/migrations/1800000000000-VirtualWarehousePermissions';
+import { WarehouseLocationManagement1810000000000 } from '../src/database/migrations/1810000000000-WarehouseLocationManagement';
+import { ApprovalCenter1820000000000 } from '../src/database/migrations/1820000000000-ApprovalCenter';
+import { ApprovalHistoryDocumentRetention1830000000000 } from '../src/database/migrations/1830000000000-ApprovalHistoryDocumentRetention';
+import { ProductionPicking1840000000000 } from '../src/database/migrations/1840000000000-ProductionPicking';
+import { InventoryManagement1850000000000 } from '../src/database/migrations/1850000000000-InventoryManagement';
+import { IntegerQuantityDefectiveProcessing1860000000000 } from '../src/database/migrations/1860000000000-IntegerQuantityDefectiveProcessing';
 
 const baseConnection = {
   host: process.env.POSTGRES_HOST || 'localhost',
@@ -74,11 +82,16 @@ async function run() {
     InitialSchema1710000000000,DashboardIndexes1720000000000,FinishedInbound1730000000000,
     V110Foundation1740000000000,V110Refactor1750000000000,ItemArchiveImages1760000000000,
     ItemCategoryTypes1770000000000,MasterDataFlexibility1780000000000,
+    DefectiveWarehouseAndMove1790000000000,VirtualWarehousePermissions1800000000000,
+    WarehouseLocationManagement1810000000000,ApprovalCenter1820000000000,
+    ApprovalHistoryDocumentRetention1830000000000,ProductionPicking1840000000000,
+    InventoryManagement1850000000000,IntegerQuantityDefectiveProcessing1860000000000,
   ] });
   await final.initialize();
   const categoryMigrations = await final.runMigrations();
   if (!categoryMigrations.some(migration => migration.name === 'ItemCategoryTypes1770000000000')) throw new Error('Category type migration was not executed');
   if (!categoryMigrations.some(migration => migration.name === 'MasterDataFlexibility1780000000000')) throw new Error('Master data flexibility migration was not executed');
+  if (!categoryMigrations.some(migration => migration.name === 'IntegerQuantityDefectiveProcessing1860000000000')) throw new Error('Integer quantity and defective processing migration was not executed');
   const [row] = await final.query(`
     SELECT i.unit_id,i.category_id,u.role_id,b.location_id,t.location_id transaction_location,
       t.balance_before,d.status
@@ -86,7 +99,17 @@ async function run() {
     WHERE i.item_code='LEGACY-M' AND u.username='legacy-admin' AND d.document_no='MI-LEGACY'
   `);
   if (!row?.unit_id || !row?.category_id || !row?.role_id || !row?.location_id || !row?.transaction_location) throw new Error('Legacy dimensions were not backfilled');
-  if (row.balance_before !== '0.0000' || row.status !== 'POSTED') throw new Error('Legacy inventory semantics changed during upgrade');
+  if (row.balance_before !== '0' || row.status !== 'POSTED') throw new Error('Legacy inventory semantics changed during upgrade');
+  const [quantityColumn]=await final.query(`
+    SELECT numeric_scale FROM information_schema.columns
+    WHERE table_schema='public' AND table_name='stock_balances' AND column_name='on_hand_qty'
+  `);
+  if(Number(quantityColumn?.numeric_scale)!==0)throw new Error('Inventory quantities were not converted to integers');
+  const [defectiveTables]=await final.query(`
+    SELECT COUNT(*)::int AS count FROM information_schema.tables
+    WHERE table_schema='public' AND table_name IN ('defective_inventory_lots','defective_disposition_records')
+  `);
+  if(Number(defectiveTables?.count)!==2)throw new Error('Defective processing tables were not created');
   const sharedCategories=await final.query(`SELECT item_type FROM item_categories WHERE code='SHARED' ORDER BY item_type`);
   const unusedCategories=await final.query(`SELECT item_type FROM item_categories WHERE code='UNUSED' ORDER BY item_type`);
   if(sharedCategories.length!==3||unusedCategories.length!==3)throw new Error('Historical categories were not split into all required item types');
@@ -100,7 +123,7 @@ async function run() {
   if(zones.length!==2||zones.some((zone:any)=>!zone.sequence_no||!zone.actual_location||!zone.system_default)){
     throw new Error('Warehouse zones and internal default locations were not upgraded');
   }
-  console.log('V1.0.0 -> V1.1.0 upgrade migration verified');
+  console.log('V1.0.0 -> current upgrade migration verified');
   await final.destroy();
   if(adminConnection){
     await adminConnection.query(`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=$1 AND pid<>pg_backend_pid()`,[upgradeDatabase]);

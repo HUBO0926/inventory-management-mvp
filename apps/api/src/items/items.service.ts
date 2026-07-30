@@ -109,7 +109,7 @@ export class ItemsService {
     const current = await this.get(id);
     const dto = this.normalizeAliases(input, true);
     if (dto.unitId !== undefined || dto.unit !== undefined) {
-      const unit = await this.resolveUnit(dto.unitId, dto.unit);
+      const unit = await this.resolveUnitForCreate(dto.unitId, dto.unit);
       if (!unit) throw new BusinessException('VALIDATION_ERROR', '单位不存在或已停用');
       dto.unitId = unit.id;
       dto.unit = unit.name;

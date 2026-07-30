@@ -48,7 +48,7 @@ export class InventoryReportService {
     const unitTotals = await this.db.query(
       `WITH report_rows AS (${definition.sql})
        SELECT COALESCE(unit,'无单位') unit,
-         COALESCE(sum(COALESCE("${quantityColumn}"::numeric,0)),0)::numeric(18,4)::text quantity
+         COALESCE(sum(COALESCE("${quantityColumn}"::numeric,0)),0)::numeric(18,0)::text quantity
        FROM report_rows GROUP BY COALESCE(unit,'无单位') ORDER BY 1`,
       definition.params,
     );
@@ -121,10 +121,10 @@ export class InventoryReportService {
         sql: `SELECT w.id "warehouseId",w.warehouse_code "warehouseCode",w.name "warehouseName",
           w.warehouse_type "warehouseType",i.id "itemId",i.item_code "itemCode",i.name "itemName",
           i.model,i.spec,i.unit,i.minimum_stock::text "minimumStock",
-          sum(sb.on_hand_qty)::numeric(18,4)::text "onHandQty",
-          sum(GREATEST(sb.on_hand_qty-COALESCE(sb.frozen_qty,0)-COALESCE(res.qty,0),0))::numeric(18,4)::text "availableQty",
-          sum(COALESCE(sb.frozen_qty,0))::numeric(18,4)::text "frozenQty",
-          sum(COALESCE(res.qty,0))::numeric(18,4)::text "reservedQty",
+          sum(sb.on_hand_qty)::numeric(18,0)::text "onHandQty",
+          sum(GREATEST(sb.on_hand_qty-COALESCE(sb.frozen_qty,0)-COALESCE(res.qty,0),0))::numeric(18,0)::text "availableQty",
+          sum(COALESCE(sb.frozen_qty,0))::numeric(18,0)::text "frozenQty",
+          sum(COALESCE(res.qty,0))::numeric(18,0)::text "reservedQty",
           count(DISTINCT sb.location_id)::int "locationCount",
           count(DISTINCT sb.batch_id)::int "batchCount",
           count(sb.id)::int "inventoryRecordCount",
@@ -164,7 +164,7 @@ export class InventoryReportService {
           count(DISTINCT sb.item_id)::int "itemCount",count(sb.id)::int "inventoryRecordCount",
           count(*) FILTER(WHERE sb.on_hand_qty>0 AND sb.on_hand_qty<=i.minimum_stock)::int "lowStockCount",
           count(*) FILTER(WHERE sb.on_hand_qty=0)::int "zeroStockCount",
-          i.unit,sum(sb.on_hand_qty)::numeric(18,4)::text "onHandQty"
+          i.unit,sum(sb.on_hand_qty)::numeric(18,0)::text "onHandQty"
           FROM stock_balances sb JOIN warehouses w ON w.id=sb.warehouse_id JOIN items i ON i.id=sb.item_id
           ${balanceWhere} GROUP BY w.id,w.warehouse_code,w.name,i.unit`,
         params,
@@ -202,10 +202,10 @@ export class InventoryReportService {
       const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
       return {
         sql: `SELECT i.id "itemId",i.item_code "itemCode",i.name "itemName",i.unit,
-          ${fromIndex ? `COALESCE(sum(t.delta_qty) FILTER(WHERE t.created_at < $${fromIndex}::date),0)` : '0'}::numeric(18,4)::text "openingQty",
-          COALESCE(sum(t.delta_qty) FILTER(WHERE t.delta_qty>0 AND ${movementRange}),0)::numeric(18,4)::text "inQty",
-          abs(COALESCE(sum(t.delta_qty) FILTER(WHERE t.delta_qty<0 AND ${movementRange}),0))::numeric(18,4)::text "outQty",
-          COALESCE(sum(t.delta_qty) FILTER(WHERE ${toIndex ? `t.created_at < ($${toIndex}::date + interval '1 day')` : 'true'}),0)::numeric(18,4)::text "closingQty"
+          ${fromIndex ? `COALESCE(sum(t.delta_qty) FILTER(WHERE t.created_at < $${fromIndex}::date),0)` : '0'}::numeric(18,0)::text "openingQty",
+          COALESCE(sum(t.delta_qty) FILTER(WHERE t.delta_qty>0 AND ${movementRange}),0)::numeric(18,0)::text "inQty",
+          abs(COALESCE(sum(t.delta_qty) FILTER(WHERE t.delta_qty<0 AND ${movementRange}),0))::numeric(18,0)::text "outQty",
+          COALESCE(sum(t.delta_qty) FILTER(WHERE ${toIndex ? `t.created_at < ($${toIndex}::date + interval '1 day')` : 'true'}),0)::numeric(18,0)::text "closingQty"
           FROM stock_transactions t JOIN warehouses w ON w.id=t.warehouse_id JOIN items i ON i.id=t.item_id
           ${clause} GROUP BY i.id,i.item_code,i.name,i.unit`,
         params,
@@ -226,9 +226,9 @@ export class InventoryReportService {
     if (type === 'movement-summary') {
       return {
         sql: `SELECT w.id "warehouseId",w.warehouse_code "warehouseCode",i.id "itemId",i.item_code "itemCode",i.name "itemName",i.unit,
-          sum(t.delta_qty) FILTER(WHERE t.delta_qty>0)::numeric(18,4)::text "inQty",
-          abs(sum(t.delta_qty) FILTER(WHERE t.delta_qty<0))::numeric(18,4)::text "outQty",
-          sum(t.delta_qty)::numeric(18,4)::text "closingQty",count(*)::int "movementCount"
+          sum(t.delta_qty) FILTER(WHERE t.delta_qty>0)::numeric(18,0)::text "inQty",
+          abs(sum(t.delta_qty) FILTER(WHERE t.delta_qty<0))::numeric(18,0)::text "outQty",
+          sum(t.delta_qty)::numeric(18,0)::text "closingQty",count(*)::int "movementCount"
           FROM stock_transactions t JOIN warehouses w ON w.id=t.warehouse_id JOIN items i ON i.id=t.item_id
           ${txClause} GROUP BY w.id,w.warehouse_code,i.id,i.item_code,i.name,i.unit`,
         params,
@@ -238,9 +238,9 @@ export class InventoryReportService {
     return {
       sql: `SELECT po.id "productionOrderId",po.order_no "productionOrderNo",fg.item_code "outputItemCode",
         i.id "itemId",i.item_code "itemCode",i.name "itemName",i.unit,
-        sum(CASE WHEN d.document_type='PRODUCTION_ISSUE' THEN l.quantity ELSE 0 END)::numeric(18,4)::text "issuedQty",
-        sum(CASE WHEN d.document_type='PRODUCTION_RETURN' THEN l.quantity ELSE 0 END)::numeric(18,4)::text "returnedQty",
-        sum(CASE WHEN d.document_type='PRODUCTION_ISSUE' THEN l.quantity ELSE -l.quantity END)::numeric(18,4)::text "closingQty"
+        sum(CASE WHEN d.document_type='PRODUCTION_ISSUE' THEN l.quantity ELSE 0 END)::numeric(18,0)::text "issuedQty",
+        sum(CASE WHEN d.document_type='PRODUCTION_RETURN' THEN l.quantity ELSE 0 END)::numeric(18,0)::text "returnedQty",
+        sum(CASE WHEN d.document_type='PRODUCTION_ISSUE' THEN l.quantity ELSE -l.quantity END)::numeric(18,0)::text "closingQty"
         FROM stock_document_lines l JOIN stock_documents d ON d.id=l.document_id
         JOIN production_orders po ON po.id=d.production_order_id JOIN items fg ON fg.id=po.finished_good_id
         JOIN items i ON i.id=l.item_id JOIN warehouses w ON w.id=COALESCE(l.source_warehouse_id,d.warehouse_id)

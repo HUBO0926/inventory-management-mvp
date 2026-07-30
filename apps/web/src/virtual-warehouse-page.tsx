@@ -9,7 +9,7 @@ import {
 import { useNavigate } from 'react-router-dom';
 import { api } from './api';
 import { PageScaffold } from './components';
-import { formatQuantity, statusText } from './domain';
+import { formatBeijingTime, formatQuantity, statusText } from './domain';
 import { useIsMobile } from './responsive';
 
 type VirtualUser = { role?: string; permissions?: string[] };
@@ -23,11 +23,7 @@ const zoneLabel = (row: any) => `${text(row?.code, '未命名库区')} ${text(ro
 const locationLabel = (row: any) => `${text(row?.code, '未命名库位')} ${text(row?.name, '未命名库位')}`;
 const typeLabel = (type: string) => ({ RAW: '原材料库', FG: '成品库', DEFECTIVE: '不良品库' }[type] || '未定义仓库');
 const typeClass = (type: string) => ({ RAW: 'raw', FG: 'fg', DEFECTIVE: 'defective' }[type] || 'raw');
-const dateText = (value: unknown) => {
-  if (!value) return '-';
-  const date = new Date(String(value));
-  return Number.isNaN(date.getTime()) ? '-' : date.toLocaleString('zh-CN', { hour12: false });
-};
+const dateText = formatBeijingTime;
 
 const operations = [
   { key: 'inbound', label: '原材料入库', path: '/inbound', icon: <ImportOutlined />, types: ['RAW'], permission: 'stock.create' },

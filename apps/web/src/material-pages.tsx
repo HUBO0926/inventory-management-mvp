@@ -34,7 +34,7 @@ import {
 import type { User } from './App';
 import { api, uploadItemImage } from './api';
 import { PageScaffold, StatusTag } from './components';
-import { formatQuantity } from './domain';
+import { formatBeijingTime, formatQuantity } from './domain';
 import { compressItemImage, formatFileSize, validateItemImage } from './item-image';
 import { ResponsiveTable as Table } from './responsive';
 
@@ -180,7 +180,7 @@ export function MaterialListPage({ type, user }: { type: MaterialType; user: Use
     { title: '安全库存', dataIndex: 'minimumStock', align: 'right', render: formatQuantity },
     { title: '状态', dataIndex: 'status', render: (value: string) => <StatusTag value={value} /> },
     { title: '创建人', dataIndex: 'createdByName', render: (value: string) => value || '-' },
-    { title: '更新时间', dataIndex: 'updatedAt', render: (value: string) => value ? new Date(value).toLocaleString('zh-CN') : '-' },
+    { title: '更新时间', dataIndex: 'updatedAt', render: formatBeijingTime },
     {
       title: '操作',
       fixed: 'right',
@@ -248,7 +248,6 @@ export function MaterialFormPage({ user }: { user: User }) {
   const requestedType = getRequestedType(location.search);
   const [form] = Form.useForm();
   const [detail, setDetail] = useState<any>();
-  const [units, setUnits] = useState<any[]>([]);
   const [categories, setCategories] = useState<any[]>([]);
   const [warehouses, setWarehouses] = useState<any[]>([]);
   const [loading, setLoading] = useState(editing);
@@ -276,7 +275,7 @@ export function MaterialFormPage({ user }: { user: User }) {
       model: item.model,
       spec: item.spec,
       categoryId: item.categoryId,
-      unitId: item.unitId,
+      unit: item.unit,
       minimumStock: Number(item.minimumStock),
       defaultWarehouseId: item.defaultWarehouseId,
       enableBatch: item.enableBatch,
@@ -298,12 +297,10 @@ export function MaterialFormPage({ user }: { user: User }) {
     setLoading(true);
     void (async () => {
       try {
-        const [unitRows, warehouseRows, item] = await Promise.all([
-          api('/units?pageSize=100&status=ACTIVE'),
+        const [warehouseRows, item] = await Promise.all([
           api('/warehouses'),
           id ? loadDetail() : Promise.resolve(undefined),
         ]);
-        setUnits(unitRows.items);
         setWarehouses(warehouseRows.filter((row: any) => row.status === 'ACTIVE'));
         const itemType = (item?.itemType || requestedType) as MaterialType;
         await loadCategories(itemType);
@@ -376,10 +373,10 @@ export function MaterialFormPage({ user }: { user: User }) {
     if (allowIdentity) {
       payload.itemCode = values.itemCode;
       payload.itemType = values.itemType;
-      payload.unitId = values.unitId;
+      payload.unit = String(values.unit||'').trim();
     }
     const identityChanged = editing && allowIdentity && detail && (
-      values.itemCode !== detail.itemCode || values.itemType !== detail.itemType || values.unitId !== detail.unitId
+      values.itemCode !== detail.itemCode || values.itemType !== detail.itemType || String(values.unit||'').trim() !== detail.unit
     );
     if (identityChanged) {
       const confirmed = await new Promise<boolean>(resolve => Modal.confirm({
@@ -454,7 +451,7 @@ export function MaterialFormPage({ user }: { user: User }) {
                 <Col xs={24} md={12}><Form.Item label="物料编码" name="itemCode" rules={[{ required: true }, { pattern: /^[A-Za-z0-9][A-Za-z0-9-]{0,49}$/, message: '仅允许字母、数字和横线' }]}><Input disabled={identityLocked} onInput={event => { const input = event.currentTarget; input.value = input.value.toUpperCase(); }} /></Form.Item></Col>
                 <Col xs={24} md={12}><Form.Item label="物料名称" name="name" rules={[{ required: true }, { min: 2, max: 100 }]}><Input /></Form.Item></Col>
                 <Col xs={24} md={12}><Form.Item label="物料类型" name="itemType" rules={[{ required: true }]}><Select disabled={!editing || identityLocked} onChange={(value: MaterialType) => { form.setFieldValue('categoryId', undefined); void loadCategories(value); }} options={(detail?.allowedItemTypes || Object.keys(typeMeta)).map((value: string) => ({ value, label: typeLabel[value] }))} /></Form.Item></Col>
-                <Col xs={24} md={12}><Form.Item label="计量单位" name="unitId" rules={[{ required: true }]}><Select disabled={identityLocked} showSearch optionFilterProp="label" options={units.map(row => ({ value: row.id, label: `${row.code} ${row.name}` }))} /></Form.Item></Col>
+                <Col xs={24} md={12}><Form.Item label="计量单位" name="unit" rules={[{ required: true, whitespace: true }, { max: 50 }]}><Input disabled={identityLocked} placeholder="自定义输入，如：个、箱、千克" /></Form.Item></Col>
                 <Col xs={24} md={12}><Form.Item
                   label={<Space size={4}>物料分类<Button type="link" size="small" onClick={() => window.open(`/material-categories?itemType=${form.getFieldValue('itemType') || currentType}`, '_blank', 'noopener,noreferrer')}>管理分类</Button></Space>}
                   name="categoryId"
@@ -468,7 +465,7 @@ export function MaterialFormPage({ user }: { user: User }) {
                     disabled: row.status === 'INACTIVE' && row.id !== detail?.categoryId,
                   }))}
                 /></Form.Item></Col>
-                <Col xs={24} md={12}><Form.Item label="安全库存" name="minimumStock" rules={[{ required: true }]}><InputNumber min={0} precision={4} stringMode style={{ width: '100%' }} /></Form.Item></Col>
+                <Col xs={24} md={12}><Form.Item label="安全库存" name="minimumStock" rules={[{ required: true }]}><InputNumber min={0} precision={0} stringMode style={{ width: '100%' }} /></Form.Item></Col>
                 <Col xs={24} md={12}><Form.Item label="品牌" name="brand" rules={[{ max: 100 }]}><Input /></Form.Item></Col>
                 <Col xs={24} md={12}><Form.Item label="型号" name="model" rules={[{ max: 100 }]}><Input /></Form.Item></Col>
                 <Col xs={24}><Form.Item label="规格" name="spec" rules={[{ max: 500 }]}><Input.TextArea rows={3} showCount maxLength={500} /></Form.Item></Col>
@@ -521,8 +518,8 @@ export function MaterialDetailPage({ user }: { user: User }) {
             <Descriptions.Item label="备注" span={2}>{detail.remark || '-'}</Descriptions.Item>
             <Descriptions.Item label="创建人">{detail.createdByName || '-'}</Descriptions.Item>
             <Descriptions.Item label="更新人">{detail.updatedByName || '-'}</Descriptions.Item>
-            <Descriptions.Item label="创建时间">{new Date(detail.createdAt).toLocaleString('zh-CN')}</Descriptions.Item>
-            <Descriptions.Item label="更新时间">{new Date(detail.updatedAt).toLocaleString('zh-CN')}</Descriptions.Item>
+            <Descriptions.Item label="创建时间">{formatBeijingTime(detail.createdAt)}</Descriptions.Item>
+            <Descriptions.Item label="更新时间">{formatBeijingTime(detail.updatedAt)}</Descriptions.Item>
           </Descriptions>
         </Col>
       </Row>

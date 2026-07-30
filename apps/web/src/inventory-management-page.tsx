@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
-  Button, Card, DatePicker, Descriptions, Drawer, Empty, Form, Input, Modal, Pagination, Select, Space, Spin, Table, Tabs, Tag, Typography, message,
+  Button, Card, DatePicker, Descriptions, Drawer, Empty, Input, Modal, Pagination, Select, Space, Spin, Table, Tabs, Tag, Typography, message,
 } from 'antd';
 import {
   DownloadOutlined, EyeOutlined, FileSearchOutlined, PrinterOutlined, ReloadOutlined, RollbackOutlined,
@@ -8,7 +8,7 @@ import {
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import dayjs from 'dayjs';
 import { API_BASE, api, idempotencyKey, token } from './api';
-import { formatQuantity, statusText } from './domain';
+import { formatBeijingTime, formatQuantity, statusText } from './domain';
 import { selectDefaultInventoryWarehouse } from './inventory-report-model';
 import { ResponsiveTable, useIsMobile } from './responsive';
 
@@ -16,11 +16,12 @@ type UserLike = { role: string; permissions?: string[] };
 type TabKey = 'documents' | 'flows' | 'reports';
 
 const safe = (value: any, fallback: any = '—'): any => value === undefined || value === null || value === '' ? fallback : value;
-const dateTime = (value: unknown) => value ? new Date(String(value)).toLocaleString('zh-CN', { hour12: false }) : '—';
+const dateTime = formatBeijingTime;
 const can = (user: UserLike, permission: string) => user.role === 'ADMIN' || Boolean(user.permissions?.includes(permission));
 const typeOptions = [
   'MATERIAL_INBOUND', 'FINISHED_INBOUND', 'FINISHED_OUTBOUND', 'INVENTORY_ADJUSTMENT', 'STOCK_MOVE',
-  'PRODUCTION_ISSUE', 'PRODUCTION_RETURN', 'PRODUCTION_COMPLETION', 'REVERSAL',
+  'PRODUCTION_ISSUE', 'PRODUCTION_RETURN', 'PRODUCTION_COMPLETION',
+  'DEFECTIVE_RETURN', 'DEFECTIVE_REPAIR_RESTOCK', 'DEFECTIVE_PRODUCTION_RETURN', 'REVERSAL',
 ].map(value => ({ value, label: statusText[value] || value }));
 const statusOptions = ['DRAFT', 'SUBMITTED', 'REJECTED', 'POSTED', 'VOIDED', 'CANCELLED']
   .map(value => ({ value, label: statusText[value] || value }));
@@ -92,8 +93,6 @@ function DocumentDetail({ detail, open, mobile, onClose, onAction, onEdit, user 
   }
   if (detail?.status === 'SUBMITTED') actionButtons.push(
     can(user, 'stock.withdraw') && <Button key="withdraw" onClick={() => onAction('withdraw')}>撤回</Button>,
-    can(user, 'stock.reject') && <Button key="reject" danger onClick={() => onAction('reject')}>驳回</Button>,
-    can(user, 'stock.approve') && <Button key="approve" type="primary" onClick={() => onAction('approve')}>审核通过并过账</Button>,
   );
   if (detail?.status === 'REJECTED') {
     if (can(user, 'stock.submit')) actionButtons.push(<Button key="resubmit" type="primary" onClick={() => onAction('submit')}>重新提交</Button>);
@@ -103,13 +102,15 @@ function DocumentDetail({ detail, open, mobile, onClose, onAction, onEdit, user 
     <Button key="void" danger icon={<RollbackOutlined />} onClick={() => onAction('void')}>冲销</Button>,
   );
   return <Drawer
+    rootClassName="document-print-drawer"
     title={`库存单据详情 · ${safe(detail?.documentNo, '未生成单号')}`}
     width={mobile ? '100%' : 820}
     open={open}
     onClose={onClose}
-    footer={<Space wrap style={{ display: 'flex', justifyContent: 'flex-end' }}><Button onClick={onClose}>关闭</Button>{actionButtons}</Space>}
+    footer={<Space wrap style={{ display: 'flex', justifyContent: 'flex-end' }}><Button icon={<PrinterOutlined/>} onClick={()=>window.print()}>打印</Button><Button onClick={onClose}>关闭</Button>{actionButtons}</Space>}
   >
     {detail ? <Space direction="vertical" size={16} style={{ width: '100%' }}>
+      <div className="document-print-header"><Typography.Title level={3}>库存单据</Typography.Title><span>{statusText[detail.status]||detail.status}</span></div>
       <Descriptions bordered size="small" column={mobile ? 1 : 2}>
         <Descriptions.Item label="业务类型">{statusText[detail.documentType] || safe(detail.documentType)}</Descriptions.Item>
         <Descriptions.Item label="状态"><Tag>{statusText[detail.status] || safe(detail.status)}</Tag></Descriptions.Item>
@@ -118,7 +119,14 @@ function DocumentDetail({ detail, open, mobile, onClose, onAction, onEdit, user 
         <Descriptions.Item label="来源单号">{safe(detail.sourceDocumentNo)}</Descriptions.Item>
         <Descriptions.Item label="创建人">{safe(detail.createdByName, '未知人员')}</Descriptions.Item>
         <Descriptions.Item label="创建时间">{dateTime(detail.createdAt)}</Descriptions.Item>
+        <Descriptions.Item label="提交人">{safe(detail.submittedByName)}</Descriptions.Item>
+        <Descriptions.Item label="提交时间">{dateTime(detail.submittedAt)}</Descriptions.Item>
+        <Descriptions.Item label="审核人">{safe(detail.approvedByName)}</Descriptions.Item>
+        <Descriptions.Item label="审核时间">{dateTime(detail.approvedAt)}</Descriptions.Item>
+        <Descriptions.Item label="过账人">{safe(detail.postedByName)}</Descriptions.Item>
         <Descriptions.Item label="过账时间">{dateTime(detail.postedAt)}</Descriptions.Item>
+        {detail.voidedAt && <Descriptions.Item label="冲销人">{safe(detail.voidedByName)}</Descriptions.Item>}
+        {detail.voidedAt && <Descriptions.Item label="冲销时间">{dateTime(detail.voidedAt)}</Descriptions.Item>}
         <Descriptions.Item label="备注" span={2}>{safe(detail.notes, '无')}</Descriptions.Item>
       </Descriptions>
       <Table size="small" rowKey="id" pagination={false} scroll={{ x: 900 }} dataSource={detail.lines || []} columns={[
@@ -129,6 +137,11 @@ function DocumentDetail({ detail, open, mobile, onClose, onAction, onEdit, user 
         { title: '批次', dataIndex: 'batchNo', render: safe },
         { title: '数量', align: 'right' as const, render: (_: any, row: any) => `${formatQuantity(row.quantity)} ${safe(row.unit, '')}` },
       ]} />
+      {detail.receiptAllocations?.length>0&&<Card size="small" title="审核入库分配"><Table size="small" rowKey={(row:any)=>`${row.documentLineId}-${row.disposition}-${row.locationId}`} pagination={false} dataSource={detail.receiptAllocations} columns={[
+        {title:'类别',dataIndex:'disposition',render:(value:string)=>value==='NORMAL'?'正常品':'不良品'},
+        {title:'仓库 / 库位',render:(_:any,row:any)=>`${safe(row.warehouseCode)} / ${safe(row.locationCode)}`},
+        {title:'数量',dataIndex:'quantity',render:formatQuantity},{title:'不良原因',dataIndex:'defectReason',render:safe},
+      ]}/></Card>}
       <Card size="small" title="操作记录">
         <Table size="small" rowKey={(row: any) => `${row.action}-${row.createdAt}`} pagination={false} dataSource={detail.operationRecords || []} columns={[
           { title: '时间', dataIndex: 'createdAt', render: dateTime },
@@ -145,6 +158,7 @@ function DocumentDetail({ detail, open, mobile, onClose, onAction, onEdit, user 
           { title: '变动', dataIndex: 'deltaQty', align: 'right' as const, render: (value: any) => <span className={Number(value) >= 0 ? 'qty-in' : 'qty-out'}>{Number(value) >= 0 ? '+' : ''}{formatQuantity(value)}</span> },
         ]} />
       </Card>
+      <div className="document-print-signatures"><span>制单：{safe(detail.createdByName)}</span><span>审核：{safe(detail.approvedByName)}</span><span>仓库签字：_______________</span></div>
     </Space> : <Empty description="暂无单据详情" />}
   </Drawer>;
 }
@@ -155,9 +169,6 @@ function DocumentsTab({ user, params, updateParams, warehouses }: any) {
   const [data, setData] = useState<any>({ items: [], total: 0 });
   const [loading, setLoading] = useState(false);
   const [detail, setDetail] = useState<any>();
-  const [locations, setLocations] = useState<any[]>([]);
-  const [allocationOpen, setAllocationOpen] = useState(false);
-  const [allocationForm] = Form.useForm();
   const documentId = params.get('documentId');
   const values = Object.fromEntries(params.entries());
   const load = async () => {
@@ -176,36 +187,21 @@ function DocumentsTab({ user, params, updateParams, warehouses }: any) {
   };
   useEffect(() => { void load(); }, [params.toString()]);
   useEffect(() => {
-    api('/warehouse-locations?page=1&pageSize=100').then(result => setLocations(result?.items || [])).catch(() => setLocations([]));
-  }, []);
-  useEffect(() => {
     if (!documentId) { setDetail(undefined); return; }
     api(`/stock-documents/${documentId}`).then(setDetail).catch((error: any) => message.error(error.message));
   }, [documentId]);
-  const perform = async (action: string, payload?: any) => {
+  const perform = async (action: string) => {
     if (!detail) return;
-    if (action === 'approve' && !payload && ['MATERIAL_INBOUND', 'FINISHED_INBOUND'].includes(detail.documentType)) {
-      allocationForm.setFieldsValue({
-        allocations: (detail.lines || []).map((line: any) => ({
-          documentLineId: line.id, normalQty: Number(line.quantity), defectiveQty: 0, normalLocationId: line.locationId,
-        })),
-      });
-      setAllocationOpen(true);
-      return;
-    }
     const confirmed = await new Promise<boolean>(resolve => Modal.confirm({
-      title: action === 'approve' ? '确认审核通过并立即过账？' : `确认${({ submit: '提交', withdraw: '撤回', cancel: '取消', reject: '驳回', void: '冲销' } as any)[action] || '执行'}该单据？`,
-      content: action === 'approve' ? '库存余额与不可修改流水将在同一事务内更新。入库单默认按原库位全部作为正常品入库；需要不良品分流时请在审核中心处理。' : undefined,
+      title: `确认${({ submit: '提交', withdraw: '撤回', cancel: '取消', void: '冲销' } as any)[action] || '执行'}该单据？`,
       onOk: () => resolve(true), onCancel: () => resolve(false),
     }));
     if (!confirmed) return;
     try {
-      const headers = ['approve', 'void'].includes(action) ? { 'Idempotency-Key': idempotencyKey() } : undefined;
-      let body: any = payload || {};
-      if (action === 'reject' || action === 'void') body = { reason: action === 'reject' ? '库存管理页审核驳回' : '库存管理页发起冲销' };
+      const headers = action === 'void' ? { 'Idempotency-Key': idempotencyKey() } : undefined;
+      const body = action === 'void' ? { reason: '库存管理页发起冲销' } : {};
       await api(`/stock-documents/${detail.id}/${action}`, { method: 'POST', headers, body: JSON.stringify(body) });
-      message.success(action === 'approve' ? '审核通过，库存已过账' : '操作成功');
-      setAllocationOpen(false);
+      message.success('操作成功');
       await Promise.all([load(), api(`/stock-documents/${detail.id}`).then(setDetail)]);
       window.dispatchEvent(new Event('inventory:refresh'));
     } catch (error: any) { message.error(error.message); }
@@ -233,25 +229,6 @@ function DocumentsTab({ user, params, updateParams, warehouses }: any) {
     };
     navigate(`${path[detail.documentType] || '/inventory/management'}?documentId=${detail.id}`);
   };
-  const submitAllocation = async (values: any) => {
-    const rows = values.allocations || [];
-    const receiptAllocations: any[] = [];
-    for (let index = 0; index < rows.length; index += 1) {
-      const row = rows[index], line = detail.lines[index];
-      const normal = Number(row.normalQty || 0), defective = Number(row.defectiveQty || 0), total = Number(line.quantity || 0);
-      if (Math.abs(normal + defective - total) > 0.00001) {
-        message.error(`${line.itemCode} 的正常品与不良品数量之和必须等于 ${formatQuantity(total)}`);
-        return;
-      }
-      if (defective > 0 && (!row.defectiveWarehouseId || !row.defectiveLocationId)) {
-        message.error(`${line.itemCode} 已填写不良品数量，请选择不良品仓库和库位`);
-        return;
-      }
-      if (normal > 0) receiptAllocations.push({ documentLineId: line.id, disposition: 'NORMAL', warehouseId: detail.warehouseId, locationId: row.normalLocationId, batchId: line.batchId || undefined, quantity: String(normal) });
-      if (defective > 0) receiptAllocations.push({ documentLineId: line.id, disposition: 'DEFECTIVE', warehouseId: row.defectiveWarehouseId, locationId: row.defectiveLocationId, batchId: line.batchId || undefined, quantity: String(defective) });
-    }
-    await perform('approve', { receiptAllocations });
-  };
   return <Card className="inventory-tab-card">
     <div className="inventory-tab-toolbar">
       <Filters values={values} warehouses={warehouses} onChange={updateParams} onReset={() => updateParams({
@@ -263,36 +240,6 @@ function DocumentsTab({ user, params, updateParams, warehouses }: any) {
     </div>
     <Table rowKey="id" loading={loading} columns={columns} dataSource={data.items || []} scroll={{ x: 1200 }} onChange={(pagination, _filters, sorter: any) => updateParams({ page: pagination.current, sortField: sorter.field, sortOrder: sorter.order === 'ascend' ? 'ASC' : 'DESC' })} pagination={{ current: Number(values.page || 1), pageSize: 20, total: data.total || 0, showTotal: total => `共 ${total} 条` }} />
     <DocumentDetail detail={detail} open={Boolean(documentId)} mobile={mobile} onClose={() => updateParams({ documentId: undefined })} onAction={perform} onEdit={edit} user={user} />
-    <Modal width={760} title="入库审核分配" open={allocationOpen} onCancel={() => setAllocationOpen(false)} onOk={() => allocationForm.submit()} okText="审核通过并过账" destroyOnHidden>
-      <Typography.Paragraph type="secondary">每条明细必须完整分配；可全部正常入库、全部进入不良品库，或按数量拆分。</Typography.Paragraph>
-      <Form form={allocationForm} layout="vertical" onFinish={submitAllocation}>
-        <Form.List name="allocations">{fields => <Space direction="vertical" style={{ width: '100%' }}>
-          {fields.map((field, index) => {
-            const line = detail?.lines?.[index] || {};
-            return <Card key={field.key} size="small" title={`${safe(line.itemCode, '未编码')} ${safe(line.itemName, '未命名物料')} · 送审 ${formatQuantity(line.quantity)} ${safe(line.unit, '')}`}>
-              <Form.Item name={[field.name, 'documentLineId']} hidden><Input /></Form.Item>
-              <div className="receipt-allocation-grid">
-                <Form.Item label="正常品数量" name={[field.name, 'normalQty']} rules={[{ required: true }]}><Input type="number" min={0} step="0.0001" /></Form.Item>
-                <Form.Item label="正常入库库位" name={[field.name, 'normalLocationId']} rules={[{ required: true }]}>
-                  <Select options={locations.filter(location => location.warehouseId === detail?.warehouseId).map(location => ({ value: location.id, label: `${safe(location.code, '未命名库位')} ${safe(location.name, '')}` }))} />
-                </Form.Item>
-                <Form.Item label="不良品数量" name={[field.name, 'defectiveQty']} rules={[{ required: true }]}><Input type="number" min={0} step="0.0001" /></Form.Item>
-                <Form.Item label="不良品仓库" name={[field.name, 'defectiveWarehouseId']}>
-                  <Select allowClear options={warehouses.filter((warehouse: any) => warehouse.warehouseType === 'DEFECTIVE' && warehouse.status === 'ACTIVE').map((warehouse: any) => ({ value: warehouse.id, label: `${safe(warehouse.warehouseCode)} ${safe(warehouse.name, '未命名仓库')}` }))} />
-                </Form.Item>
-                <Form.Item noStyle shouldUpdate>{({ getFieldValue }) => {
-                  const warehouseId = getFieldValue(['allocations', field.name, 'defectiveWarehouseId']);
-                  const defectiveQty = Number(getFieldValue(['allocations', field.name, 'defectiveQty']) || 0);
-                  return <Form.Item label="不良品入库库位" name={[field.name, 'defectiveLocationId']} rules={defectiveQty > 0 ? [{ required: true, message: '请选择不良品库位' }] : []}>
-                    <Select allowClear disabled={!defectiveQty} options={locations.filter(location => location.warehouseId === warehouseId).map(location => ({ value: location.id, label: `${safe(location.code, '未命名库位')} ${safe(location.name, '')}` }))} />
-                  </Form.Item>;
-                }}</Form.Item>
-              </div>
-            </Card>;
-          })}
-        </Space>}</Form.List>
-      </Form>
-    </Modal>
   </Card>;
 }
 

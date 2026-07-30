@@ -215,7 +215,7 @@ export function BomsPage({ user }: { user: User }) {
                     <Select showSearch optionFilterProp="label" options={componentOptions} />
                   </Form.Item></Col>
                   <Col xs={20} sm={6}><Form.Item {...field} label="单件用量" name={[field.name, 'qtyPer']} rules={[{ required: true }]}>
-                    <InputNumber min={0.0001} precision={4} stringMode style={{ width: '100%' }} />
+                    <InputNumber min={1} precision={0} stringMode style={{ width: '100%' }} />
                   </Form.Item></Col>
                   <Col xs={4} sm={2}><Button danger type="text" icon={<DeleteOutlined />} aria-label="删除 BOM 明细" onClick={() => removeLine(field.name)} /></Col>
                 </Row>

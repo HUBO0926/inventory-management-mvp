@@ -15,6 +15,7 @@ import { ApprovalCenter1820000000000 } from './migrations/1820000000000-Approval
 import { ApprovalHistoryDocumentRetention1830000000000 } from './migrations/1830000000000-ApprovalHistoryDocumentRetention';
 import { ProductionPicking1840000000000 } from './migrations/1840000000000-ProductionPicking';
 import { InventoryManagement1850000000000 } from './migrations/1850000000000-InventoryManagement';
+import { IntegerQuantityDefectiveProcessing1860000000000 } from './migrations/1860000000000-IntegerQuantityDefectiveProcessing';
 
 export const createDataSource = () => {
   const connection = process.env.DATABASE_URL
@@ -46,7 +47,9 @@ export const createDataSource = () => {
       ApprovalHistoryDocumentRetention1830000000000,
       ProductionPicking1840000000000,
       InventoryManagement1850000000000,
+      IntegerQuantityDefectiveProcessing1860000000000,
     ],
+    extra: { options: '-c timezone=Asia/Shanghai' },
     logging: process.env.DB_LOGGING === 'true',
   });
 };
