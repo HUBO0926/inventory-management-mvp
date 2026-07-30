@@ -8,18 +8,19 @@ async function login(page: any, username: string) {
     await page.goto('/');
     await page.evaluate((authToken: string) => localStorage.setItem('inventory_token', authToken), tokens[username]);
     await page.reload();
-    await expect(page.getByText('库存驾驶舱').first()).toBeVisible();
+    await expect(page.getByRole('heading', { name: '库存生产一体化驾驶舱' })).toBeVisible();
     return;
   }
   await page.goto('/');
   await page.getByLabel('账号').fill(username);
   await page.getByLabel('密码').fill(password);
   await page.getByRole('button', { name: '登录系统' }).click();
-  await expect(page.getByText('库存驾驶舱').first()).toBeVisible();
+  await expect(page.getByRole('heading', { name: '库存生产一体化驾驶舱' })).toBeVisible();
 }
 
 test('三个内置角色可登录并按权限显示菜单', async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== 'desktop-chromium');
+  await page.setViewportSize({ width: 1920, height: 1080 });
   const usernames = ['admin', 'warehouse', 'production'];
   for (const [index, username] of usernames.entries()) {
     await login(page, username);
@@ -43,7 +44,7 @@ test('管理员可切换主题并查看构建版本', async ({ page }, testInfo)
   await login(page, 'admin');
   await page.getByLabel('切换浅色/深色主题').click();
   await expect.poll(() => page.evaluate(() => document.documentElement.dataset.theme)).toBe('dark');
-  await expect(page.getByText('V1.2.0', { exact: true })).toBeVisible();
+  await expect(page.getByText('V1.3.0', { exact: true })).toBeVisible();
 });
 
 test('管理员主要路由无白屏、脚本错误和整体横向溢出', async ({ page }) => {
@@ -94,4 +95,74 @@ test('手机端使用抽屉导航且页面无整体横向溢出', async ({ page 
   await page.getByRole('menu').getByText('原材料档案', { exact: true }).click();
   await expect(page.locator('.mobile-record-card').first()).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+});
+
+test('一体化驾驶舱在 1920 与 1366 下保持八项指标且无横向溢出', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop-chromium');
+  await login(page, 'admin');
+  for (const viewport of [{ width: 1920, height: 1080, sidebar: 220 }, { width: 1366, height: 768, sidebar: 72 }]) {
+    await page.setViewportSize(viewport);
+    await page.evaluate(() => localStorage.removeItem('inventory_sidebar_collapsed'));
+    await page.reload();
+    await expect(page.getByRole('heading', { name: '库存生产一体化驾驶舱' })).toBeVisible();
+    await expect(page.locator('.cockpit-main-metric')).toHaveCount(4);
+    await expect(page.locator('.cockpit-aux-metric')).toHaveCount(4);
+    const layout = await page.evaluate(() => ({
+      overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+      sidebarWidth: Math.round(document.querySelector('.app-sider')?.getBoundingClientRect().width || 0),
+    }));
+    expect(layout.overflow).toBe(false);
+    expect(layout.sidebarWidth).toBe(viewport.sidebar);
+  }
+});
+
+test('审核中心和库存管理与标准业务页保持一致左侧留白', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop-chromium');
+  await login(page, 'admin');
+  await page.setViewportSize({ width: 1366, height: 768 });
+  await page.goto('/material-categories');
+  await expect(page.getByRole('heading', { name: '物料分类' })).toBeVisible();
+  const standardLeft = await page.locator('.page').evaluate(element => Math.round(element.getBoundingClientRect().left));
+  await page.goto('/approvals');
+  await expect(page.getByRole('heading', { name: '审核中心' })).toBeVisible();
+  const approvalsLeft = await page.locator('.approvals-page').evaluate(element => Math.round(element.getBoundingClientRect().left));
+  await page.goto('/inventory/management');
+  await expect(page.getByRole('heading', { name: '库存管理' })).toBeVisible();
+  const inventoryLeft = await page.locator('.inventory-management-page').evaluate(element => Math.round(element.getBoundingClientRect().left));
+  expect(approvalsLeft).toBe(standardLeft);
+  expect(inventoryLeft).toBe(standardLeft);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+});
+
+test('驾驶舱筛选可由 URL 恢复、刷新保留并规范无效参数', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop-chromium');
+  await login(page, 'admin');
+  await page.goto('/?inventoryType=RAW&period=30D&productionStatus=IN_PROGRESS&q=GNSS');
+  await expect(page.getByText('库存变化趋势 · 最近 30 天')).toBeVisible();
+  await page.reload();
+  expect(page.url()).toContain('inventoryType=RAW');
+  expect(page.url()).toContain('period=30D');
+  expect(page.url()).toContain('productionStatus=IN_PROGRESS');
+  expect(page.url()).toContain('q=GNSS');
+  await page.goto('/?dateFrom=2026-07-01&dateTo=2026-07-29');
+  await expect(page.getByText('库存变化趋势 · 2026-07-01 至 2026-07-29')).toBeVisible();
+  await page.reload();
+  expect(page.url()).toContain('dateFrom=2026-07-01');
+  expect(page.url()).toContain('dateTo=2026-07-29');
+  await page.goto('/?inventoryType=bad&period=14D&productionStatus=bad');
+  await expect.poll(() => new URL(page.url()).search).toBe('');
+});
+
+test('驾驶舱风险摘要可打开详情抽屉并保持 URL 状态', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop-chromium');
+  await login(page, 'admin');
+  const risk = page.locator('.risk-priority-row');
+  if (await risk.count()) {
+    await risk.first().click();
+    await expect(page.getByText('驾驶舱摘要详情')).toBeVisible();
+    expect(page.url()).toContain('detailType=risk');
+    expect(page.url()).toContain('detailId=');
+    await page.getByRole('button', { name: '关闭' }).click();
+    expect(page.url()).not.toContain('detailType=');
+  }
 });

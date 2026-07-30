@@ -341,7 +341,7 @@ export class WarehousesController {
     const [summary] = await qr.query(`SELECT coalesce(sum(on_hand_qty),0)::text "onHandQty",count(*)::int "balanceRows" FROM stock_balances WHERE location_id=$1`, [locationId]);
     const pendingRows = await qr.query(`SELECT DISTINCT d.document_no "documentNo" FROM stock_documents d JOIN stock_document_lines l ON l.document_id=d.id WHERE d.status IN ('DRAFT','SUBMITTED') AND (l.location_id=$1 OR l.target_location_id=$1) ORDER BY d.document_no LIMIT 5`, [locationId]);
     const [history] = await qr.query(`SELECT ((SELECT count(*) FROM stock_transactions WHERE location_id=$1)+(SELECT count(*) FROM stock_document_lines WHERE location_id=$1 OR target_location_id=$1)+(SELECT count(*) FROM stock_document_receipt_allocations WHERE location_id=$1))::int "count"`, [locationId]);
-    return { onHandQty: Number(summary?.onHandQty || 0).toFixed(4), pendingDocuments: pendingRows.map((row: any) => row.documentNo), hasHistory: Number(history?.count || 0) > 0 || Number(summary?.balanceRows || 0) > 0 };
+    return { onHandQty: Number(summary?.onHandQty || 0).toFixed(0), pendingDocuments: pendingRows.map((row: any) => row.documentNo), hasHistory: Number(history?.count || 0) > 0 || Number(summary?.balanceRows || 0) > 0 };
   }
 
   private async removeZone(qr: QueryRunner, zone: any) {

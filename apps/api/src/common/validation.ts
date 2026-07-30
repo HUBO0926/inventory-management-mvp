@@ -2,14 +2,14 @@ import { applyDecorators } from '@nestjs/common';
 import { Transform } from 'class-transformer';
 import { IsString, Matches, MaxLength } from 'class-validator';
 
-export const DECIMAL_PATTERN = /^(?:0|[1-9]\d{0,13})(?:\.\d{1,4})?$/;
-export const POSITIVE_DECIMAL_PATTERN = /^(?=.*[1-9])(?:0|[1-9]\d{0,13})(?:\.\d{1,4})?$/;
+export const DECIMAL_PATTERN = /^(?:0|[1-9]\d{0,17})$/;
+export const POSITIVE_DECIMAL_PATTERN = /^[1-9]\d{0,17}$/;
 
 export function IsQuantity(allowZero = false) {
   return applyDecorators(
     Transform(({ value }) => value === undefined || value === null ? value : String(value)),
     IsString(),
-    Matches(allowZero ? DECIMAL_PATTERN : POSITIVE_DECIMAL_PATTERN, { message: allowZero ? '数量不能小于0且最多4位小数' : '数量必须大于0且最多4位小数' }),
+    Matches(allowZero ? DECIMAL_PATTERN : POSITIVE_DECIMAL_PATTERN, { message: allowZero ? '数量必须是大于等于 0 的整数' : '数量必须是大于 0 的整数' }),
     MaxLength(19),
   );
 }

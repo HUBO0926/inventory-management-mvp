@@ -18,6 +18,7 @@ import type { User } from './App';
 import { api } from './api';
 import { PageScaffold, StatusTag } from './components';
 import { ResponsiveTable as Table } from './responsive';
+import { formatBeijingTime } from './domain';
 
 type MaterialType = 'MATERIAL' | 'FINISHED_GOOD';
 
@@ -131,7 +132,7 @@ export function MaterialCategoriesPage({ user }: { user: User }) {
     { title: '引用物料数', dataIndex: 'itemCount', align: 'right' },
     { title: '排序', dataIndex: 'sortOrder', align: 'right' },
     { title: '状态', dataIndex: 'status', render: (value: string) => <StatusTag value={value} /> },
-    { title: '更新时间', dataIndex: 'updatedAt', render: (value: string) => value ? new Date(value).toLocaleString('zh-CN') : '-' },
+    { title: '更新时间', dataIndex: 'updatedAt', render: formatBeijingTime },
     {
       title: '操作',
       width: manageable ? 180 : 80,

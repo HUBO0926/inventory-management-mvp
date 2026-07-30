@@ -6,7 +6,7 @@ import { DeleteOutlined, DownloadOutlined, PlusOutlined } from '@ant-design/icon
 import { api, idempotencyKey, token } from './api';
 import { PageScaffold, StatusTag } from './components';
 import { ResponsiveTable as Table } from './responsive';
-import { formatQuantity, statusText } from './domain';
+import { formatBeijingTime, formatQuantity, statusText } from './domain';
 import { useParams } from 'react-router-dom';
 import type { User } from './App';
 
@@ -192,8 +192,6 @@ export function StockDocumentsV110Page({ type }: { type: StockType }) {
   const meta = stockMeta[type];
   const adjustment = type === 'INVENTORY_ADJUSTMENT';
   const moving = type === 'STOCK_MOVE';
-  const [approving, setApproving] = useState<any>();
-  const [approvalForm] = Form.useForm();
   const [rows, setRows] = useState<any[]>([]);
   const [items, setItems] = useState<any[]>([]);
   const [warehouses, setWarehouses] = useState<any[]>([]);
@@ -223,32 +221,12 @@ export function StockDocumentsV110Page({ type }: { type: StockType }) {
     try {
       await api(`/stock-documents/${record.id}/${action}`, {
         method: 'POST',
-        headers: ['approve', 'void'].includes(action) ? { 'Idempotency-Key': idempotencyKey() } : undefined,
+        headers: action === 'void' ? { 'Idempotency-Key': idempotencyKey() } : undefined,
         body: body ? JSON.stringify(body) : undefined,
       });
-      message.success({ submit: '已提交审核', withdraw: '已撤回', approve: '审核通过并已过账', reject: '已驳回', void: '已冲销' }[action] || '操作成功');
+      message.success({ submit: '已提交审核', withdraw: '已撤回', void: '已冲销' }[action] || '操作成功');
       load();
     } catch (error) { fail(error); }
-  };
-  const reject = (record: any) => {
-    let reason = '';
-    Modal.confirm({ title: '驳回单据', content: <Input.TextArea placeholder="请输入驳回原因" onChange={event => { reason = event.target.value; }} />, onOk: () => reason.trim() ? run(record, 'reject', { reason }) : Promise.reject(message.error('请输入驳回原因')) });
-  };
-  const openApprove = async (record: any) => {
-    try {
-      const detail = await api(`/stock-documents/${record.id}`);
-      if (!['MATERIAL_INBOUND', 'FINISHED_INBOUND'].includes(detail.documentType)) { await run(record, 'approve'); return; }
-      setApproving(detail);
-      approvalForm.setFieldsValue({ allocations: detail.lines.map((line: any) => ({ documentLineId: line.id, normalQty: Number(line.quantity), defectiveQty: 0, normalLocationId: line.locationId })) });
-    } catch (error) { fail(error); }
-  };
-  const submitApproval = async (values: any) => {
-    const allocations: any[] = [];
-    for (const row of values.allocations || []) {
-      if (Number(row.normalQty || 0) > 0) allocations.push({ documentLineId: row.documentLineId, disposition: 'NORMAL', warehouseId: approving.warehouseId, locationId: row.normalLocationId, quantity: String(row.normalQty) });
-      if (Number(row.defectiveQty || 0) > 0) allocations.push({ documentLineId: row.documentLineId, disposition: 'DEFECTIVE', warehouseId: row.defectiveWarehouseId, locationId: row.defectiveLocationId, quantity: String(row.defectiveQty) });
-    }
-    try { await run(approving, 'approve', { receiptAllocations: allocations }); setApproving(undefined); } catch { /* run has shown the error */ }
   };
   const edit = async (record: any) => {
     try {
@@ -265,13 +243,11 @@ export function StockDocumentsV110Page({ type }: { type: StockType }) {
     <div className="toolbar"><span /><Button type="primary" onClick={() => { const params = new URLSearchParams(window.location.search); const warehouseId = params.get('warehouseId') || undefined; const zoneId = params.get('zoneId') || undefined; const sourceLocation = locations.find(location => location.warehouseId === warehouseId && (!zoneId || location.zoneId === zoneId)); setEditing(undefined); form.resetFields(); form.setFieldsValue({ warehouseId, lines: [{ locationId: sourceLocation?.id }] }); setOpen(true); }}>新建{meta.title}单</Button></div>
     <Table rowKey="id" dataSource={rows} columns={[
       { title: '单号', dataIndex: 'documentNo' }, { title: '仓库', dataIndex: 'warehouseCode' }, { title: '状态', dataIndex: 'status', render: value => <StatusTag value={value} /> },
-      { title: '创建时间', dataIndex: 'createdAt', render: value => dayjs(value).format('YYYY-MM-DD HH:mm:ss') },
+      { title: '创建时间', dataIndex: 'createdAt', render: formatBeijingTime },
       { title: '操作', render: (_, record) => <Space wrap>
         {['DRAFT', 'REJECTED'].includes(record.status) && <Button type="link" onClick={() => edit(record)}>编辑</Button>}
         {['DRAFT', 'REJECTED'].includes(record.status) && <Button type="link" onClick={() => run(record, 'submit')}>提交</Button>}
         {record.status === 'SUBMITTED' && <Button type="link" onClick={() => run(record, 'withdraw')}>撤回</Button>}
-        {record.status === 'SUBMITTED' && <Button type="link" onClick={() => openApprove(record)}>审核通过</Button>}
-        {record.status === 'SUBMITTED' && <Button danger type="link" onClick={() => reject(record)}>驳回</Button>}
         {record.status === 'POSTED' && <Button danger type="link" onClick={() => run(record, 'void', { reason: '页面冲销' })}>冲销</Button>}
         {['DRAFT', 'REJECTED'].includes(record.status) && <Popconfirm title="确认删除该草稿？" onConfirm={() => remove(record.id)}><Button danger type="link" icon={<DeleteOutlined />}>删除</Button></Popconfirm>}
       </Space> },
@@ -295,9 +271,6 @@ export function StockDocumentsV110Page({ type }: { type: StockType }) {
         </Card>)}<Button block type="dashed" onClick={() => add()}>增加明细</Button></>}</Form.List>
         <Form.Item label="备注" name="notes"><Input.TextArea /></Form.Item>
       </Form>
-    </Modal>
-    <Modal width={820} title="入库审核与不良品分流" open={!!approving} onCancel={() => setApproving(undefined)} onOk={() => approvalForm.submit()} destroyOnHidden>
-      {approving && <Form form={approvalForm} layout="vertical" onFinish={submitApproval}><div className="document-notice">正常品与不良品数量之和必须等于送审数量；全部正常入库时无需填写不良品信息。</div><Form.List name="allocations">{fields => <>{fields.map(field => <Card key={field.key} size="small" style={{ marginBottom: 10 }}><Form.Item {...field} name={[field.name, 'documentLineId']} hidden><Input /></Form.Item><Form.Item noStyle shouldUpdate>{({ getFieldValue }) => { const line = approving.lines.find((row: any) => row.id === getFieldValue(['allocations', field.name, 'documentLineId'])); const defectiveWarehouseId = getFieldValue(['allocations', field.name, 'defectiveWarehouseId']); return <><strong>{line?.itemCode} {line?.itemName}（送审 {line?.quantity}）</strong><Space wrap style={{ display: 'flex', marginTop: 8 }}><Form.Item {...field} label="正常入库数量" name={[field.name, 'normalQty']} rules={[{ required: true }]}><InputNumber min={0} precision={4} /></Form.Item><Form.Item {...field} label="正常库位" name={[field.name, 'normalLocationId']} rules={[{ required: true }]}><Select style={{ width: 180 }} options={locations.filter(location => location.warehouseId === approving.warehouseId).map(location => ({ value: location.id, label: location.code }))} /></Form.Item><Form.Item {...field} label="不良品数量" name={[field.name, 'defectiveQty']}><InputNumber min={0} precision={4} /></Form.Item><Form.Item {...field} label="不良品仓库" name={[field.name, 'defectiveWarehouseId']}><Select style={{ width: 180 }} options={warehouses.filter(warehouse => warehouse.warehouseType === 'DEFECTIVE').map(warehouse => ({ value: warehouse.id, label: `${warehouse.warehouseCode} ${warehouse.name}` }))} /></Form.Item><Form.Item {...field} label="不良品库位" name={[field.name, 'defectiveLocationId']}><Select style={{ width: 180 }} options={locations.filter(location => location.warehouseId === defectiveWarehouseId).map(location => ({ value: location.id, label: location.code }))} /></Form.Item></Space></>; }}</Form.Item></Card>)}</>}</Form.List></Form>}
     </Modal>
   </PageScaffold>;
 }
@@ -348,7 +321,7 @@ export function TransactionsV110Page() {
   return <PageScaffold title="库存流水" subtitle="流水不可修改或删除；记录变动前数量、库位、批次、变动量和变动后结余。">
     <div className="toolbar"><Input.Search allowClear style={{ width: 320 }} placeholder="物料或来源单号" onChange={event => setKeyword(event.target.value)} onSearch={load} /></div>
     <Table rowKey="id" dataSource={data.items} columns={[
-      { title: '时间', dataIndex: 'createdAt', render: value => dayjs(value).format('YYYY-MM-DD HH:mm:ss') }, { title: '仓库', dataIndex: 'warehouseCode' }, { title: '库位', dataIndex: 'locationCode' },
+      { title: '时间', dataIndex: 'createdAt', render: formatBeijingTime }, { title: '仓库', dataIndex: 'warehouseCode' }, { title: '库位', dataIndex: 'locationCode' },
       { title: '物料', render: (_, r) => `${r.itemCode} ${r.itemName}` }, { title: '批次', dataIndex: 'batchNo', render: value => value || '-' },
       { title: '来源单号', dataIndex: 'documentNo' }, { title: '类型', dataIndex: 'documentType', render: value => statusText[value] || value },
       { title: '变动前', dataIndex: 'balanceBefore', align: 'right', render: formatQuantity }, { title: '变动量', dataIndex: 'deltaQty', align: 'right', render: value => <span className={Number(value) >= 0 ? 'positive' : 'negative'}>{Number(value) > 0 ? '+' : ''}{formatQuantity(value)}</span> },
@@ -405,8 +378,8 @@ export function ProductionDetailV110Page({ user }: { user: User }) {
     ]} /></Card>
     <Card title="关联库存单据" style={{ marginTop: 16 }}><Table rowKey="id" pagination={false} dataSource={data.documents} columns={[
       { title: '单号', dataIndex: 'documentNo' }, { title: '类型', dataIndex: 'documentType', render: value => statusText[value] || value },
-      { title: '状态', dataIndex: 'status', render: value => <StatusTag value={value} /> }, { title: '提交时间', dataIndex: 'submittedAt', render: value => value ? dayjs(value).format('YYYY-MM-DD HH:mm:ss') : '-' },
-      { title: '过账时间', dataIndex: 'postedAt', render: value => value ? dayjs(value).format('YYYY-MM-DD HH:mm:ss') : '-' },
+      { title: '状态', dataIndex: 'status', render: value => <StatusTag value={value} /> }, { title: '提交时间', dataIndex: 'submittedAt', render: formatBeijingTime },
+      { title: '过账时间', dataIndex: 'postedAt', render: formatBeijingTime },
     ]} /></Card>
     <Modal width={760} title={action === 'issue' ? '生产领料' : action === 'return' ? '生产退料' : '完工报产'} open={!!action} onCancel={() => setAction(undefined)} onOk={() => form.submit()} destroyOnHidden>
       <Form form={form} layout="vertical" onFinish={submit}>
@@ -472,7 +445,7 @@ export function UsersV110Page() {
 export function AuditPage() {
   const [data, setData] = useState<any>({ items: [] });
   useEffect(() => { api('/audit/logs?pageSize=100').then(setData).catch(fail); }, []);
-  return <PageScaffold title="操作日志" subtitle="查看用户、对象、结果、错误码、请求编号和应用版本；密码与 Token 不记录。"><Table rowKey="id" dataSource={data.items} columns={[{ title: '时间', dataIndex: 'createdAt', render: value => dayjs(value).format('YYYY-MM-DD HH:mm:ss') }, { title: '用户', dataIndex: 'username' }, { title: '操作', dataIndex: 'action' }, { title: '对象', render: (_, r) => `${r.entityType || '-'} / ${r.entityId || '-'}` }, { title: '结果', dataIndex: 'result' }, { title: '版本', dataIndex: 'appVersion' }]} /></PageScaffold>;
+  return <PageScaffold title="操作日志" subtitle="查看用户、对象、结果、错误码、请求编号和应用版本；密码与 Token 不记录。"><Table rowKey="id" dataSource={data.items} columns={[{ title: '时间', dataIndex: 'createdAt', render: formatBeijingTime }, { title: '用户', dataIndex: 'username' }, { title: '操作', dataIndex: 'action' }, { title: '对象', render: (_, r) => `${r.entityType || '-'} / ${r.entityId || '-'}` }, { title: '结果', dataIndex: 'result' }, { title: '版本', dataIndex: 'appVersion' }]} /></PageScaffold>;
 }
 
 export function AboutPage() {
@@ -567,10 +540,10 @@ export function StockDocumentsPage() {
   ];
 
   const action = (r: any, kind: string) => Modal.confirm({
-    title: kind === 'post' ? '确认过账？' : kind === 'submit' ? '确认提交？' : '确认冲销？',
+    title: kind === 'submit' ? '确认提交审核？' : '确认冲销？',
     onOk: async () => {
       try {
-        const endpoint = kind === 'submit' ? `/stock-documents/${r.id}/submit` : kind === 'post' ? `/stock-documents/${r.id}/post` : `/stock-documents/${r.id}/void`;
+        const endpoint = kind === 'submit' ? `/stock-documents/${r.id}/submit` : `/stock-documents/${r.id}/void`;
         await api(endpoint, { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey() }, body: kind === 'void' ? JSON.stringify({ reason: '页面冲销' }) : undefined });
         message.success('操作成功'); load();
       } catch (e) { fail(e); }
@@ -585,11 +558,10 @@ export function StockDocumentsPage() {
     <Table rowKey="id" dataSource={data.items} columns={[
       { title: '单号', dataIndex: 'documentNo' }, { title: '类型', dataIndex: 'documentType', render: (v: string) => statusText[v] || v },
       { title: '状态', dataIndex: 'status', render: (v: string) => <StatusTag value={v} /> },
-      { title: '仓库', dataIndex: 'warehouseCode' }, { title: '创建时间', dataIndex: 'createdAt', render: (v: string) => new Date(v).toLocaleString() },
+      { title: '仓库', dataIndex: 'warehouseCode' }, { title: '创建时间', dataIndex: 'createdAt', render: formatBeijingTime },
       { title: '操作', render: (_: any, r: any) => <Space>
         <Button type="link" onClick={() => nav(`/stock-documents/${r.id}`)}>详情</Button>
         {r.status === 'DRAFT' && <Button type="link" onClick={() => action(r, 'submit')}>提交</Button>}
-        {['DRAFT','SUBMITTED'].includes(r.status) && <Button type="link" onClick={() => action(r, 'post')}>过账</Button>}
         {r.status === 'POSTED' && <Button danger type="link" onClick={() => action(r, 'void')}>冲销</Button>}
       </Space> },
     ]} />

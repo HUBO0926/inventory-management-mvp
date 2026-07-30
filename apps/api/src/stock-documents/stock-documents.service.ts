@@ -90,12 +90,13 @@ export class StockDocumentsService {
     } catch (error) { await qr.rollbackTransaction(); throw error; } finally { await qr.release(); }
   }
 
-  post(id: string, key: string | undefined, userId: string) { return this.posting.executeIdempotent(userId, key, 'POST:/stock-documents/:id/post', { id }, qr => this.applyAndFinalize(qr, id, userId, ['DRAFT', 'SUBMITTED'])); }
   async submit(id: string, userId: string, context: ApprovalContext = {}) {
     const qr = this.db.createQueryRunner(); await qr.connect(); await qr.startTransaction();
     try { const [doc] = await qr.query(`SELECT status FROM stock_documents WHERE id=$1 FOR UPDATE`, [id]); if (!doc) throw new BusinessException('NOT_FOUND', '库存单据不存在'); if (doc.status==='SUBMITTED') { await qr.commitTransaction(); return this.get(id); } if (!['DRAFT','REJECTED'].includes(doc.status)) throw new BusinessException('INVALID_STATUS', '只有草稿或已驳回单据可以提交');
       await this.reservations.reserveDocument(qr,id);
-      await qr.query(`UPDATE stock_documents SET status='SUBMITTED',submitted_by=$1,submitted_at=now(),updated_at=now() WHERE id=$2`, [userId,id]);
+      await qr.query(`UPDATE stock_documents SET status='SUBMITTED',submitted_by=$1,submitted_by_user_id=$1,
+        submitted_by_username=(SELECT username FROM users WHERE id=$1),submitted_by_name=(SELECT name FROM users WHERE id=$1),
+        submitted_at=now(),updated_at=now() WHERE id=$2`, [userId,id]);
       await this.approvalHistory.record(qr,id,'SUBMITTED',doc.status,'SUBMITTED',userId,context); await this.audit.log(userId,'SUBMIT_STOCK_DOCUMENT','stock_documents',id,undefined,qr.manager); await qr.commitTransaction(); return this.get(id);
     } catch (e) { await qr.rollbackTransaction(); throw e; } finally { await qr.release(); }
   }
@@ -103,16 +104,17 @@ export class StockDocumentsService {
     const qr = this.db.createQueryRunner(); await qr.connect(); await qr.startTransaction();
     try { const [doc] = await qr.query(`SELECT status FROM stock_documents WHERE id=$1 FOR UPDATE`, [id]); if (!doc || doc.status !== 'SUBMITTED') throw new BusinessException('INVALID_STATUS', '只有待审核单据可以撤回');
       await this.reservations.releaseDocument(qr,id);
-      await qr.query(`UPDATE stock_documents SET status='DRAFT',submitted_by=NULL,submitted_at=NULL,updated_at=now() WHERE id=$1`, [id]);
+      await qr.query(`UPDATE stock_documents SET status='DRAFT',submitted_by=NULL,submitted_by_user_id=NULL,
+        submitted_by_username=NULL,submitted_by_name=NULL,submitted_at=NULL,updated_at=now() WHERE id=$1`, [id]);
       await this.approvalHistory.record(qr,id,'WITHDRAWN','SUBMITTED','DRAFT',userId,context); await this.audit.log(userId,'WITHDRAW_STOCK_DOCUMENT','stock_documents',id,undefined,qr.manager); await qr.commitTransaction(); return this.get(id);
     } catch (e) { await qr.rollbackTransaction(); throw e; } finally { await qr.release(); }
   }
 
   approve(id: string, dto: any, key: string | undefined, userId: string, context: ApprovalContext = {}) {
-    return this.posting.executeIdempotent(userId, key, 'POST:/stock-documents/:id/approve', { id, receiptAllocations: dto?.receiptAllocations || null }, async qr => {
+    return this.posting.executeIdempotent(userId, key, 'POST:/approvals/:id/approve', { id, receiptAllocations: dto?.receiptAllocations || null }, async qr => {
       const [doc] = await qr.query(`SELECT document_type,status FROM stock_documents WHERE id=$1 FOR UPDATE`, [id]);
       if (!doc) throw new BusinessException('NOT_FOUND', '库存单据不存在');
-      if ([DocumentType.MATERIAL_INBOUND, DocumentType.FINISHED_INBOUND].includes(doc.document_type)) await this.saveReceiptAllocations(qr, id, dto?.receiptAllocations);
+      if ([DocumentType.MATERIAL_INBOUND, DocumentType.FINISHED_INBOUND, DocumentType.PRODUCTION_RETURN, DocumentType.PRODUCTION_COMPLETION].includes(doc.document_type)) await this.saveReceiptAllocations(qr, id, dto?.receiptAllocations);
       const result = await this.applyAndFinalize(qr, id, userId, ['SUBMITTED']);
       await this.approvalHistory.record(qr,id,'APPROVED','SUBMITTED','POSTED',userId,{ ...context, idempotencyKey:key }); return result;
     });
@@ -122,7 +124,9 @@ export class StockDocumentsService {
     if (!reason?.trim()) throw new BusinessException('VALIDATION_ERROR', '请填写驳回原因');
     const execute = async (qr: QueryRunner) => { const [doc] = await qr.query(`SELECT status FROM stock_documents WHERE id=$1 FOR UPDATE`,[id]); if (!doc || doc.status !== 'SUBMITTED') throw new BusinessException('INVALID_STATUS','只有待审核单据可以驳回');
       await this.reservations.releaseDocument(qr,id);
-      await qr.query(`UPDATE stock_documents SET status='REJECTED',rejected_by=$1,rejected_at=now(),rejection_reason=$2,updated_at=now() WHERE id=$3`,[userId,reason,id]);
+      await qr.query(`UPDATE stock_documents SET status='REJECTED',rejected_by=$1,rejected_by_user_id=$1,
+        rejected_by_username=(SELECT username FROM users WHERE id=$1),rejected_by_name=(SELECT name FROM users WHERE id=$1),
+        rejected_at=now(),rejection_reason=$2,updated_at=now() WHERE id=$3`,[userId,reason,id]);
       await this.approvalHistory.record(qr,id,'REJECTED','SUBMITTED','REJECTED',userId,{...context,reason}); await this.audit.log(userId,'REJECT_STOCK_DOCUMENT','stock_documents',id,{reason},qr.manager); return this.get(id); };
     if (context.idempotencyKey) return this.posting.executeIdempotent(userId,context.idempotencyKey,'POST:/approvals/:id/reject',{id,reason,reasonCode:context.reasonCode||null},execute);
     const qr=this.db.createQueryRunner(); await qr.connect(); await qr.startTransaction(); try { const result=await execute(qr); await qr.commitTransaction(); return result; } catch(e){await qr.rollbackTransaction();throw e;} finally {await qr.release();}
@@ -136,13 +140,16 @@ export class StockDocumentsService {
       const transactions = await qr.query(`SELECT t.warehouse_id,t.location_id,t.item_id,t.batch_id,abs(t.delta_qty)::text quantity,CASE WHEN t.delta_qty>0 THEN 'OUT' ELSE 'IN' END direction FROM stock_transactions t WHERE t.source_document_id=$1 ORDER BY t.warehouse_id,t.location_id,t.item_id`, [id]);
       const reversal = await this.posting.createDocument(qr, { documentType: DocumentType.REVERSAL, warehouseId: original.warehouse_id, productionOrderId: original.production_order_id, originalDocumentId: id, notes: reason || `冲销 ${original.document_no}`, lines: transactions.map((line: any) => ({ itemId: line.item_id, quantity: line.quantity, locationId: line.location_id, targetWarehouseId: line.warehouse_id, batchId: line.batch_id, direction: line.direction })) }, userId);
       const posted = await this.posting.applyDocument(qr, reversal.id, userId, ['DRAFT']);
-      await qr.query(`UPDATE stock_documents SET status='VOIDED',voided_by=$1,voided_at=now(),updated_at=now() WHERE id=$2`, [userId, id]);
+      await qr.query(`UPDATE stock_documents SET status='VOIDED',voided_by=$1,voided_by_user_id=$1,
+        voided_by_username=(SELECT username FROM users WHERE id=$1),voided_by_name=(SELECT name FROM users WHERE id=$1),
+        voided_at=now(),updated_at=now() WHERE id=$2`, [userId, id]);
       if (original.production_order_id) await this.reverseProduction(qr, original);
+      await qr.query(`UPDATE defective_inventory_lots SET remaining_qty=0,status='RESOLVED',updated_at=now() WHERE source_document_id=$1`, [id]);
       await this.audit.log(userId, 'VOID_STOCK_DOCUMENT', 'stock_documents', id, { reversalId: reversal.id, reason }, qr.manager); return { ...posted, originalDocumentId: id };
     });
   }
 
-  async createAdjustment(dto: any, userId: string) { const lines = dto.lines.map((line: any) => { const value = new Decimal(line.adjustmentQty); if (!value.isFinite() || value.isZero() || value.decimalPlaces() > 4) throw new BusinessException('VALIDATION_ERROR', '调整数量必须是非零且最多四位小数'); return { ...line, quantity: value.abs().toFixed(4), direction: value.isPositive() ? Direction.IN : Direction.OUT }; }); return this.create(DocumentType.INVENTORY_ADJUSTMENT, { ...dto, lines }, userId); }
+  async createAdjustment(dto: any, userId: string) { const lines = dto.lines.map((line: any) => { const value = new Decimal(line.adjustmentQty); if (!value.isFinite() || value.isZero() || !value.isInteger()) throw new BusinessException('VALIDATION_ERROR', '调整数量必须是非零整数'); return { ...line, quantity: value.abs().toFixed(0), direction: value.isPositive() ? Direction.IN : Direction.OUT }; }); return this.create(DocumentType.INVENTORY_ADJUSTMENT, { ...dto, lines }, userId); }
 
   private async saveReceiptAllocations(qr: QueryRunner, documentId: string, allocations: any[]) {
     const lines = await qr.query(`SELECT id,item_id,quantity,location_id,batch_id FROM stock_document_lines WHERE document_id=$1 ORDER BY id`, [documentId]);
@@ -155,8 +162,10 @@ export class StockDocumentsService {
       const total = rows.reduce((sum: Decimal, row: any) => sum.add(row.quantity || 0), new Decimal(0));
       if (!rows.length || !total.eq(line.quantity)) throw new BusinessException('VALIDATION_ERROR', '每条入库明细的正常品与不良品数量之和必须等于送审数量');
       for (const row of rows) {
-        if (!['NORMAL', 'DEFECTIVE'].includes(row.disposition) || !new Decimal(row.quantity || 0).isPositive() || !row.warehouseId || !row.locationId) throw new BusinessException('VALIDATION_ERROR', '入库审核分配不完整');
-        await qr.query(`INSERT INTO stock_document_receipt_allocations(id,document_line_id,disposition,warehouse_id,location_id,batch_id,quantity) VALUES(gen_random_uuid(),$1,$2,$3,$4,$5,$6)`, [line.id, row.disposition, row.warehouseId, row.locationId, row.batchId || line.batch_id || null, new Decimal(row.quantity).toFixed(4)]);
+        const quantity = new Decimal(row.quantity || 0);
+        if (!['NORMAL', 'DEFECTIVE'].includes(row.disposition) || !quantity.isPositive() || !quantity.isInteger() || !row.warehouseId || !row.locationId) throw new BusinessException('VALIDATION_ERROR', '入库审核分配必须填写完整的整数数量、仓库和库位');
+        if (row.disposition === 'DEFECTIVE' && !String(row.defectReason || '').trim()) throw new BusinessException('VALIDATION_ERROR', '不良品必须逐行填写不良原因');
+        await qr.query(`INSERT INTO stock_document_receipt_allocations(id,document_line_id,disposition,warehouse_id,location_id,batch_id,quantity,defect_reason) VALUES(gen_random_uuid(),$1,$2,$3,$4,$5,$6,$7)`, [line.id, row.disposition, row.warehouseId, row.locationId, row.batchId || line.batch_id || null, quantity.toFixed(0), row.disposition === 'DEFECTIVE' ? String(row.defectReason).trim() : null]);
       }
     }
   }
@@ -167,7 +176,7 @@ export class StockDocumentsService {
     if (!doc.production_order_id) return this.posting.applyDocument(qr, id, userId, allowedStatuses);
     const [order] = await qr.query(`SELECT * FROM production_orders WHERE id=$1 FOR UPDATE`, [doc.production_order_id]);
     if (!order || !['RELEASED', 'IN_PROGRESS'].includes(order.status)) throw new BusinessException('INVALID_STATUS', '生产任务已完成或取消，不能审核该单据');
-    const lines = await qr.query(`SELECT item_id,sum(quantity)::numeric(18,4) quantity,sum(normal_qty)::numeric(18,4) normal_qty,sum(spare_qty)::numeric(18,4) spare_qty FROM stock_document_lines WHERE document_id=$1 GROUP BY item_id`, [id]);
+    const lines = await qr.query(`SELECT item_id,sum(quantity)::numeric(18,0) quantity,sum(normal_qty)::numeric(18,0) normal_qty,sum(spare_qty)::numeric(18,0) spare_qty FROM stock_document_lines WHERE document_id=$1 GROUP BY item_id`, [id]);
     const materials = await qr.query(`SELECT * FROM production_order_materials WHERE production_order_id=$1 FOR UPDATE`, [doc.production_order_id]);
     if ([DocumentType.PRODUCTION_ISSUE, DocumentType.PRODUCTION_RETURN].includes(doc.document_type)) for (const line of lines) {
       const material = materials.find((row: any) => row.material_id === line.item_id); if (!material) throw new BusinessException('VALIDATION_ERROR', '单据物料不属于生产任务 BOM');
@@ -177,7 +186,10 @@ export class StockDocumentsService {
       if (doc.document_type === DocumentType.PRODUCTION_RETURN && new Decimal(line.quantity).gt(net)) throw new BusinessException('VALIDATION_ERROR', '审核后退料量将超过当前净领料量');
     }
     const total = lines.reduce((sum: Decimal, line: any) => sum.add(line.quantity), new Decimal(0));
-    if (doc.document_type === DocumentType.PRODUCTION_COMPLETION && new Decimal(order.completed_qty).add(total).gt(order.planned_qty)) throw new BusinessException('VALIDATION_ERROR', '审核后累计完工将超过计划数量');
+    const qualifiedTotal = doc.document_type === DocumentType.PRODUCTION_COMPLETION
+      ? new Decimal((await qr.query(`SELECT COALESCE(sum(a.quantity),0)::text quantity FROM stock_document_receipt_allocations a JOIN stock_document_lines l ON l.id=a.document_line_id WHERE l.document_id=$1 AND a.disposition='NORMAL'`,[id]))[0]?.quantity || 0)
+      : total;
+    if (doc.document_type === DocumentType.PRODUCTION_COMPLETION && new Decimal(order.completed_qty).add(qualifiedTotal).gt(order.planned_qty)) throw new BusinessException('VALIDATION_ERROR', '审核后合格品累计完工将超过计划数量');
     const result = await this.posting.applyDocument(qr, id, userId, allowedStatuses);
     if (doc.document_type === DocumentType.PRODUCTION_ISSUE) {
       for (const line of lines) await qr.query(`UPDATE production_order_materials SET issued_qty=issued_qty+$1,spare_issued_qty=spare_issued_qty+$2 WHERE production_order_id=$3 AND material_id=$4`, [line.normal_qty || line.quantity,line.spare_qty || 0,doc.production_order_id,line.item_id]);
@@ -187,11 +199,11 @@ export class StockDocumentsService {
       for (const line of lines) await qr.query(`UPDATE production_order_materials SET returned_qty=returned_qty+$1 WHERE production_order_id=$2 AND material_id=$3`, [line.quantity,doc.production_order_id,line.item_id]);
       await qr.query(`UPDATE production_orders SET status='IN_PROGRESS',updated_at=now() WHERE id=$1`, [doc.production_order_id]);
     }
-    if (doc.document_type === DocumentType.PRODUCTION_COMPLETION) { const completed = new Decimal(order.completed_qty).add(total); const status = completed.eq(order.planned_qty) ? 'COMPLETED' : 'IN_PROGRESS'; await qr.query(`UPDATE production_orders SET completed_qty=$1,status=$2,updated_at=now() WHERE id=$3`, [completed.toFixed(4), status, doc.production_order_id]); return { ...result, productionStatus: status, completedQty: completed.toFixed(4) }; }
+    if (doc.document_type === DocumentType.PRODUCTION_COMPLETION) { const completed = new Decimal(order.completed_qty).add(qualifiedTotal); const status = completed.eq(order.planned_qty) ? 'COMPLETED' : 'IN_PROGRESS'; await qr.query(`UPDATE production_orders SET completed_qty=$1,status=$2,updated_at=now() WHERE id=$3`, [completed.toFixed(0), status, doc.production_order_id]); return { ...result, productionStatus: status, completedQty: completed.toFixed(0) }; }
     return result;
   }
 
-  private async reverseProduction(qr: QueryRunner, doc: any) { const lines = await qr.query(`SELECT item_id,sum(quantity)::numeric(18,4) quantity,sum(normal_qty)::numeric(18,4) normal_qty,sum(spare_qty)::numeric(18,4) spare_qty FROM stock_document_lines WHERE document_id=$1 GROUP BY item_id`, [doc.id]); if (doc.document_type === DocumentType.PRODUCTION_ISSUE) { for (const line of lines) await qr.query(`UPDATE production_order_materials SET issued_qty=issued_qty-$1,spare_issued_qty=spare_issued_qty-$2 WHERE production_order_id=$3 AND material_id=$4`, [line.normal_qty || line.quantity,line.spare_qty || 0,doc.production_order_id,line.item_id]); } if (doc.document_type === DocumentType.PRODUCTION_RETURN) { for (const line of lines) await qr.query(`UPDATE production_order_materials SET returned_qty=returned_qty-$1 WHERE production_order_id=$2 AND material_id=$3`, [line.quantity,doc.production_order_id,line.item_id]); } if (doc.document_type === DocumentType.PRODUCTION_COMPLETION) await qr.query(`UPDATE production_orders SET completed_qty=completed_qty-$1 WHERE id=$2`, [lines.reduce((sum: Decimal, line: any) => sum.add(line.quantity), new Decimal(0)).toFixed(4), doc.production_order_id]); }
+  private async reverseProduction(qr: QueryRunner, doc: any) { const lines = await qr.query(`SELECT item_id,sum(quantity)::numeric(18,0) quantity,sum(normal_qty)::numeric(18,0) normal_qty,sum(spare_qty)::numeric(18,0) spare_qty FROM stock_document_lines WHERE document_id=$1 GROUP BY item_id`, [doc.id]); if (doc.document_type === DocumentType.PRODUCTION_ISSUE) { for (const line of lines) await qr.query(`UPDATE production_order_materials SET issued_qty=issued_qty-$1,spare_issued_qty=spare_issued_qty-$2 WHERE production_order_id=$3 AND material_id=$4`, [line.normal_qty || line.quantity,line.spare_qty || 0,doc.production_order_id,line.item_id]); } if (doc.document_type === DocumentType.PRODUCTION_RETURN) { for (const line of lines) await qr.query(`UPDATE production_order_materials SET returned_qty=returned_qty-$1 WHERE production_order_id=$2 AND material_id=$3`, [line.quantity,doc.production_order_id,line.item_id]); } if (doc.document_type === DocumentType.PRODUCTION_COMPLETION) { const [qualified]=await qr.query(`SELECT COALESCE(sum(a.quantity),0)::text quantity FROM stock_document_receipt_allocations a JOIN stock_document_lines l ON l.id=a.document_line_id WHERE l.document_id=$1 AND a.disposition='NORMAL'`,[doc.id]); await qr.query(`UPDATE production_orders SET completed_qty=completed_qty-$1,status='IN_PROGRESS',updated_at=now() WHERE id=$2`, [qualified.quantity, doc.production_order_id]); } }
 
   private async fillDefaultLocations(qr: QueryRunner, lines: any[], warehouseId: string) {
     if (!Array.isArray(lines) || lines.every(line => line.locationId)) return lines;
@@ -213,15 +225,19 @@ export class StockDocumentsService {
         d.original_document_id "originalDocumentId",original.document_no "originalDocumentNo",
         w.id "warehouseId",w.warehouse_code "warehouseCode",w.name "warehouseName",
         COALESCE(d.created_by_name,u.name,d.created_by_username,u.username,'—') "createdByName",
-        COALESCE(d.submitted_by_name,d.submitted_by_username,'—') "submittedByName",
-        COALESCE(d.approved_by_name,d.approved_by_username,'—') "approvedByName",
-        COALESCE(d.posted_by_name,d.posted_by_username,'—') "postedByName",
-        COALESCE(d.voided_by_name,d.voided_by_username,'—') "voidedByName",
+        COALESCE(d.submitted_by_name,su.name,d.submitted_by_username,su.username,'—') "submittedByName",
+        COALESCE(d.approved_by_name,au.name,d.approved_by_username,au.username,'—') "approvedByName",
+        COALESCE(d.posted_by_name,pu.name,d.posted_by_username,pu.username,'—') "postedByName",
+        COALESCE(d.voided_by_name,vu.name,d.voided_by_username,vu.username,'—') "voidedByName",
         d.created_at "createdAt",d.submitted_at "submittedAt",d.approved_at "approvedAt",
         d.posted_at "postedAt",d.voided_at "voidedAt"
       FROM stock_documents d
       JOIN warehouses w ON w.id=d.warehouse_id
       LEFT JOIN users u ON u.id=d.created_by
+      LEFT JOIN users su ON su.id=d.submitted_by
+      LEFT JOIN users au ON au.id=d.approved_by
+      LEFT JOIN users pu ON pu.id=d.posted_by
+      LEFT JOIN users vu ON vu.id=d.voided_by
       LEFT JOIN production_orders po ON po.id=d.production_order_id
       LEFT JOIN stock_documents original ON original.id=d.original_document_id
       WHERE d.id=$1`, [id]);
@@ -229,7 +245,7 @@ export class StockDocumentsService {
     doc.sourceBusiness = doc.productionOrderId ? '生产任务' : doc.documentType === DocumentType.REVERSAL ? '单据冲销' : '库存作业';
     doc.sourceDocumentNo = doc.productionOrderNo || doc.originalDocumentNo || null;
     doc.lines = await this.db.query(`
-      SELECT l.id,l.item_id "itemId",i.item_code "itemCode",i.name "itemName",i.model,i.spec,
+      SELECT l.id,l.item_id "itemId",i.item_code "itemCode",i.name "itemName",i.item_type "itemType",i.model,i.spec,
         COALESCE(parameters.value,'—') parameters,i.unit,l.quantity,l.direction,l.notes,
         COALESCE(l.source_warehouse_id,d.warehouse_id) "sourceWarehouseId",sw.warehouse_code "sourceWarehouseCode",
         sz.code "sourceZoneCode",l.location_id "locationId",loc.code "locationCode",
@@ -253,7 +269,7 @@ export class StockDocumentsService {
         FROM material_parameters WHERE material_id=i.id
       ) parameters ON true
       WHERE l.document_id=$1 ORDER BY i.item_code,loc.code`, [id]);
-    doc.receiptAllocations = await this.db.query(`SELECT a.document_line_id "documentLineId",a.disposition,a.warehouse_id "warehouseId",w.warehouse_code "warehouseCode",a.location_id "locationId",l.code "locationCode",a.batch_id "batchId",a.quantity FROM stock_document_receipt_allocations a JOIN stock_document_lines dl ON dl.id=a.document_line_id JOIN warehouses w ON w.id=a.warehouse_id JOIN warehouse_locations l ON l.id=a.location_id WHERE dl.document_id=$1 ORDER BY a.id`, [id]);
+    doc.receiptAllocations = await this.db.query(`SELECT a.document_line_id "documentLineId",a.disposition,a.warehouse_id "warehouseId",w.warehouse_code "warehouseCode",a.location_id "locationId",l.code "locationCode",a.batch_id "batchId",a.quantity,a.defect_reason "defectReason" FROM stock_document_receipt_allocations a JOIN stock_document_lines dl ON dl.id=a.document_line_id JOIN warehouses w ON w.id=a.warehouse_id JOIN warehouse_locations l ON l.id=a.location_id WHERE dl.document_id=$1 ORDER BY a.id`, [id]);
     doc.operationRecords = await this.db.query(`
       SELECT action,COALESCE(actor_name,actor_username,'—') "actorName",created_at "createdAt",
         CASE WHEN status_after='REJECTED' THEN '驳回' ELSE '成功' END result,

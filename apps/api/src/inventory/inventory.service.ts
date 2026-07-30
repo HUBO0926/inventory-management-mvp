@@ -32,8 +32,8 @@ export class InventoryService {
         i.id "itemId",i.item_code "itemCode",i.name "itemName",i.item_type "itemType",i.unit,
         batch.id "batchId",batch.batch_no "batchNo",
         sb.on_hand_qty "onHandQty",
-        GREATEST(sb.on_hand_qty-COALESCE(sb.frozen_qty,0)-COALESCE(res.qty,0),0)::numeric(18,4) "availableQty",
-        COALESCE(sb.frozen_qty,0)::numeric(18,4) "frozenQty",COALESCE(res.qty,0)::numeric(18,4) "reservedQty",i.minimum_stock "minimumStock",
+        GREATEST(sb.on_hand_qty-COALESCE(sb.frozen_qty,0)-COALESCE(res.qty,0),0)::numeric(18,0) "availableQty",
+        COALESCE(sb.frozen_qty,0)::numeric(18,0) "frozenQty",COALESCE(res.qty,0)::numeric(18,0) "reservedQty",i.minimum_stock "minimumStock",
         sb.updated_at "updatedAt"
        FROM stock_balances sb
        JOIN warehouses w ON w.id=sb.warehouse_id
@@ -134,15 +134,15 @@ export class InventoryService {
   async reconciliation() {
     const differences = await this.db.query(
       `WITH ledger AS (
-         SELECT warehouse_id,location_id,item_id,batch_id,sum(delta_qty)::numeric(18,4) ledger_qty
+         SELECT warehouse_id,location_id,item_id,batch_id,sum(delta_qty)::numeric(18,0) ledger_qty
          FROM stock_transactions
          GROUP BY warehouse_id,location_id,item_id,batch_id
        )
        SELECT w.warehouse_code "warehouseCode",loc.code "locationCode",
          i.item_code "itemCode",batch.batch_no "batchNo",
-         COALESCE(sb.on_hand_qty,0)::numeric(18,4)::text "balanceQty",
-         COALESCE(l.ledger_qty,0)::numeric(18,4)::text "ledgerQty",
-         (COALESCE(sb.on_hand_qty,0)-COALESCE(l.ledger_qty,0))::numeric(18,4)::text difference
+         COALESCE(sb.on_hand_qty,0)::numeric(18,0)::text "balanceQty",
+         COALESCE(l.ledger_qty,0)::numeric(18,0)::text "ledgerQty",
+         (COALESCE(sb.on_hand_qty,0)-COALESCE(l.ledger_qty,0))::numeric(18,0)::text difference
        FROM stock_balances sb
        FULL OUTER JOIN ledger l ON l.warehouse_id=sb.warehouse_id
          AND l.location_id=sb.location_id AND l.item_id=sb.item_id
@@ -168,7 +168,7 @@ export class InventoryService {
     const escape = (value: unknown) => `"${String(value ?? '').replace(/"/g, '""')}"`;
     return '\uFEFF' + [header, ...all.map((r: any) => [
       r.warehouseCode, r.zoneCode, r.locationCode, r.itemCode, r.itemName,
-      r.unit, r.batchNo, new Decimal(r.onHandQty).toFixed(4), new Decimal(r.minimumStock || 0).toFixed(4),
+      r.unit, r.batchNo, new Decimal(r.onHandQty).toFixed(0), new Decimal(r.minimumStock || 0).toFixed(0),
     ])].map(row => row.map(escape).join(',')).join('\r\n');
   }
 

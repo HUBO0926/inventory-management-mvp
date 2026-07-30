@@ -2,15 +2,17 @@
 
 一个基于 React、NestJS 和 PostgreSQL 的模块化单体库存系统，跑通原材料入库、生产任务、领退料、分次报产、独立成品入库、成品出库、库存余额和不可修改流水的完整闭环。
 
-当前开发版本为 **V1.2.0（仓储作业与生产协同升级）**。新增统一审核中心、虚拟仓库地图、库区库位管理、库存预占与一键领料、统一库存管理及物料汇总报表。历史升级说明与测试证据见 [V1.1.0 升级与回滚](docs/V1.1.0-upgrade-and-rollback.md)、[测试报告](docs/V1.1.0-test-report.md) 与 [CHANGELOG](CHANGELOG.md)。
+当前开发版本为 **V1.3.0（库存审核、质量处置与驾驶舱升级）**。新增审核中心入库分配和不良品处理、整数数量迁移、库存单据打印，以及库存生产一体化驾驶舱。升级前请阅读 [库存审核与不良品处理升级说明](docs/inventory-approval-defective-upgrade.md)，历史记录见 [CHANGELOG](CHANGELOG.md)。
 
 ## 核心约束
 
 - 所有库存变化只能调用 `InventoryPostingService`；业务 Controller 和普通 CRUD 服务不能直接修改 `stock_balances`。
+- 所有普通库存单据统一提交到审核中心处理；业务页不提供审核、驳回或直接过账入口。
 - 过账在同一 PostgreSQL 事务中锁定余额、校验负库存、写流水、更新余额和单据状态。
 - 已过账单据不能编辑或删除，只能创建反向流水冲销；`stock_transactions` 有数据库触发器禁止更新和删除。
 - 过账、冲销、生产领料、生产退料和完工报产必须携带 `Idempotency-Key`。
-- 数量使用 `numeric(18,4)`，API 以十进制字符串传输。
+- 库存与生产数量使用 `numeric(18,0)`，API 继续以十进制字符串传输；比例和布局坐标不受影响。
+- 业务时间点保存为 `timestamptz`，审核统计、页面、导出和打印统一按 `Asia/Shanghai` 处理。
 
 ## 工程结构
 
@@ -70,7 +72,7 @@ cd inventory-management-mvp
 cp .env.1panel.example .env
 ```
 
-2. 在 1Panel 文件管理器或终端编辑 `.env`。设置 `APP_VERSION=1.2.0`，并将 `POSTGRES_PASSWORD`、`JWT_SECRET` 和 `INITIAL_DEMO_PASSWORD` 替换为新的强密码；`.env` 不得提交到 Git。
+2. 在 1Panel 文件管理器或终端编辑 `.env`。设置 `APP_VERSION=1.3.0`，并将 `POSTGRES_PASSWORD`、`JWT_SECRET` 和 `INITIAL_DEMO_PASSWORD` 替换为新的强密码；`.env` 不得提交到 Git。
 3. 打开“容器 → Compose”，选择项目目录和 `docker-compose.1panel.yml`，拉取固定版本 GHCR 镜像并启动。此编排不暴露 PostgreSQL 和 API，只将 Web 绑定到 `127.0.0.1:${WEB_PORT:-8080}`。
 4. 打开“网站”，新建反向代理网站，将目标设为 `http://127.0.0.1:8080`。随后申请 Let’s Encrypt 证书并开启强制 HTTPS。公网安全组只需开放 80/443。
 5. 访问 `https://你的域名/api/health` 检查 API，再使用三个演示账号和 `INITIAL_DEMO_PASSWORD` 登录。首次验证后，管理员应立即在“账号管理”中为三个账号分别设置新密码。

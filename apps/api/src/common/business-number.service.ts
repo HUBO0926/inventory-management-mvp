@@ -12,6 +12,9 @@ export const DOCUMENT_NUMBER_PREFIX: Record<DocumentType, string> = {
   [DocumentType.PRODUCTION_COMPLETION]: 'WGBP',
   [DocumentType.STOCK_MOVE]: 'YK',
   [DocumentType.STOCK_CHECK]: 'KCPD',
+  [DocumentType.DEFECTIVE_RETURN]: 'BLTH',
+  [DocumentType.DEFECTIVE_REPAIR_RESTOCK]: 'BLFX',
+  [DocumentType.DEFECTIVE_PRODUCTION_RETURN]: 'BLFS',
   [DocumentType.REVERSAL]: 'CX',
 };
 

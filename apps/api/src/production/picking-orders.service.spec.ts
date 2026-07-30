@@ -14,8 +14,8 @@ describe('PickingOrdersService',()=>{
       materialId:'m1',normalQty:'6',spareQty:'1',
       allocations:[{warehouseId:'w1',locationId:'l1',normalQty:'5',spareQty:'1'}],
     }],[shortage]);
-    expect(result.normalQty).toBe('6.0000');
-    expect(result.spareQty).toBe('1.0000');
+    expect(result.normalQty).toBe('6');
+    expect(result.spareQty).toBe('1');
     expect(result.allocations).toHaveLength(1);
   });
 

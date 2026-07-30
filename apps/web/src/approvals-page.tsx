@@ -1,37 +1,178 @@
 import { useEffect, useState } from 'react';
-import { Button, Card, Col, Descriptions, Drawer, Form, Input, Modal, Row, Select, Space, Statistic, Table, Tag, Typography, message } from 'antd';
+import { Button, Card, Col, Descriptions, Drawer, Form, Input, InputNumber, Modal, Row, Select, Space, Statistic, Table, Tag, Typography, message } from 'antd';
 import { CheckOutlined, CloseOutlined, ReloadOutlined, SafetyCertificateOutlined } from '@ant-design/icons';
 import { api, idempotencyKey } from './api';
-import { statusText } from './domain';
+import { formatBeijingTime, formatQuantity, statusText } from './domain';
 import { useIsMobile } from './responsive';
 import type { User } from './App';
 
-const safe=(v:any,fallback:any='\u6682\u65e0')=>v===undefined||v===null||v===''?fallback:v;
-const docName=(v:any)=>statusText[v]||safe(v,'\u672a\u77e5\u4e1a\u52a1');
-const tabs:[string,string][]=[['pendingMine','\u5f85\u6211\u5ba1\u6838'],['pendingAll','\u5168\u90e8\u5f85\u5ba1\u6838'],['approved','\u6211\u5df2\u5ba1\u6838'],['submitted','\u6211\u63d0\u4ea4\u7684'],['rejected','\u5df2\u9a73\u56de'],['all','\u5168\u90e8\u8bb0\u5f55']];
-const reasons=['\u6570\u91cf\u6216\u5e93\u4f4d\u4fe1\u606f\u4e0d\u5b8c\u6574','\u5e93\u5b58\u6216\u6279\u6b21\u4fe1\u606f\u4e0d\u6b63\u786e','\u4e1a\u52a1\u5355\u636e\u586b\u5199\u6709\u8bef','\u5176\u4ed6\u539f\u56e0'];
-const T={title:'\u5ba1\u6838\u4e2d\u5fc3',description:'\u5e93\u5b58\u5355\u636e\u5fc5\u987b\u7ecf\u5ba1\u6838\u901a\u8fc7\u540e\uff0c\u624d\u4f1a\u7531\u7edf\u4e00\u8fc7\u8d26\u670d\u52a1\u53d8\u66f4\u5e93\u5b58\u3002',refresh:'\u5237\u65b0',workbench:'\u5ba1\u6838\u5de5\u4f5c\u53f0',batchReject:'\u6279\u91cf\u9a73\u56de',keyword:'\u5355\u53f7 / \u7269\u6599',documentType:'\u4e1a\u52a1\u7c7b\u578b',status:'\u72b6\u6001',reset:'\u91cd\u7f6e',close:'\u5173\u95ed',reject:'\u9a73\u56de',approve:'\u5ba1\u6838\u901a\u8fc7',minute:'\u5206\u949f',overdue:'\u8d85\u65f6',details:'\u8be6\u60c5',noNumber:'\u672a\u751f\u6210\u5355\u53f7',detailTitle:'\u5ba1\u6838\u8be6\u60c5',reason:'\u9a73\u56de\u539f\u56e0',commonReason:'\u5e38\u7528\u539f\u56e0',warehouse:'\u4ed3\u5e93',submittedAt:'\u63d0\u4ea4\u65f6\u95f4',notes:'\u5907\u6ce8',item:'\u7269\u6599',location:'\u5e93\u4f4d',batch:'\u6279\u6b21',quantity:'\u6570\u91cf',confirmApprove:'\u786e\u8ba4\u5ba1\u6838\u901a\u8fc7\uff1f',approveHint:'\u901a\u8fc7\u540e\u5c06\u6309\u672c\u5355\u636e\u660e\u7ec6\u7edf\u4e00\u8fc7\u8d26\uff0c\u5e93\u5b58\u4f59\u989d\u4e0e\u4e0d\u53ef\u4fee\u6539\u6d41\u6c34\u4f1a\u540c\u6b65\u66f4\u65b0\u3002',batchRejectTitle:'\u6279\u91cf\u9a73\u56de',rejectTitle:'\u9a73\u56de\u5355\u636e',confirmReject:'\u786e\u8ba4\u9a73\u56de'};
+const safe=(value:any,fallback:any='—')=>value===undefined||value===null||value===''?fallback:value;
+const docName=(value:any)=>statusText[value]||safe(value,'未知业务');
+const receiptTypes=['MATERIAL_INBOUND','FINISHED_INBOUND','PRODUCTION_RETURN','PRODUCTION_COMPLETION'];
+const approvalTabs:[string,string][]=[['pendingMine','待我审核'],['pendingAll','全部待审核'],['approved','我已审核'],['submitted','我提交的'],['rejected','已驳回'],['all','全部记录']];
+const rejectReasons=['数量或库位信息不完整','库存或批次信息不正确','业务单据填写有误','其他原因'];
+const actionText:Record<string,string>={RETURN:'退货',REPAIR_RESTOCK:'维修重新入库',RETURN_PRODUCTION:'退回生产任务'};
 
 export function ApprovalsPage({user}:{user:User}) {
-  const mobile=useIsMobile(); const [tab,setTab]=useState('pendingMine'); const [stats,setStats]=useState<any>({}); const [data,setData]=useState<any>({items:[],total:0}); const [loading,setLoading]=useState(false); const [selected,setSelected]=useState<string[]>([]); const [detail,setDetail]=useState<any>(); const [drawer,setDrawer]=useState(false); const [filters,setFilters]=useState<any>({}); const [rejecting,setRejecting]=useState<'batch'|'single'|undefined>(); const [form]=Form.useForm();
-  const canApprove=user.role==='ADMIN'||Boolean(user.permissions?.includes('approval.approve')); const canReject=user.role==='ADMIN'||Boolean(user.permissions?.includes('approval.reject'));
-  const load=async()=>{setLoading(true);try{const query=new URLSearchParams({tab,page:'1',pageSize:'20',...Object.fromEntries(Object.entries(filters).filter(([,v])=>v!==undefined&&v!=='')) as Record<string,string>});const [s,l]=await Promise.all([api('/approvals/statistics'),api(`/approvals?${query}`)]);setStats(s||{});setData(l||{items:[],total:0});}catch(e:any){message.error(e.message||'\u5ba1\u6838\u4e2d\u5fc3\u52a0\u8f7d\u5931\u8d25');}finally{setLoading(false);}};
-  useEffect(()=>{void load();const timer=window.setInterval(load,60000);const refresh=()=>void load();window.addEventListener('inventory:refresh',refresh);return()=>{clearInterval(timer);window.removeEventListener('inventory:refresh',refresh);};},[tab,JSON.stringify(filters)]);
-  const open=async(id:string)=>{try{const d=await api(`/approvals/${id}`);setDetail(d);setDrawer(true);}catch(e:any){message.error(e.message);}};
-  const approve=async()=>{if(!detail)return;try{await api(`/approvals/${detail.id}/approve`,{method:'POST',headers:{'Idempotency-Key':idempotencyKey()},body:JSON.stringify({receiptAllocations:detail.receiptAllocations||[]})});message.success('\u5ba1\u6838\u901a\u8fc7\uff0c\u5e93\u5b58\u5df2\u7edf\u4e00\u8fc7\u8d26');setDrawer(false);void load();}catch(e:any){message.error(e.message);}};
-  const reject=async(values:any)=>{const ids=rejecting==='batch'?selected:detail?[detail.id]:[];if(!ids.length)return;try{const path=rejecting==='batch'?'/approvals/batch-reject':`/approvals/${ids[0]}/reject`;const body=rejecting==='batch'?{documentIds:ids,reason:values.reason,reasonCode:values.reasonCode}:{reason:values.reason,reasonCode:values.reasonCode};await api(path,{method:'POST',headers:{'Idempotency-Key':idempotencyKey()},body:JSON.stringify(body)});message.success('\u5df2\u9a73\u56de');setRejecting(undefined);setDrawer(false);setSelected([]);form.resetFields();void load();}catch(e:any){message.error(e.message);}};
-  const statistics:[string,string,string][]=[['\u5f85\u6211\u5ba1\u6838','pendingMine',''],['\u8303\u56f4\u5185\u5f85\u5ba1','pendingAll',''],['\u4eca\u65e5\u5df2\u5ba1\u6838','approvedToday','green'],['\u4eca\u65e5\u5df2\u9a73\u56de','rejectedToday','red'],['\u8d85\u65f6\u5f85\u5ba1','overdue','orange'],['\u672c\u6708\u5df2\u5ba1\u6838','approvedMonth','green']];
-  const columns:any[]=[{title:'\u5355\u636e\u7f16\u53f7',dataIndex:'documentNo',render:(v:any,r:any)=><Button type="link" onClick={()=>open(r.id)}>{safe(v,T.noNumber)}</Button>},{title:'\u4e1a\u52a1\u7c7b\u578b',dataIndex:'documentType',render:docName},{title:'\u4ed3\u5e93',render:(_:any,r:any)=>`${safe(r.warehouseCode,'\u672a\u547d\u540d\u4ed3\u5e93')} ${safe(r.warehouseName,'')}`},{title:'\u4e1a\u52a1\u6458\u8981',render:(_:any,r:any)=>safe(r.notes,`${safe(r.lineCount,0)} \u6761\u7269\u6599\u660e\u7ec6`)},{title:'\u63d0\u4ea4\u4eba',dataIndex:'submitterName',render:(v:any)=>safe(v,'\u672a\u77e5')},{title:'\u63d0\u4ea4\u65f6\u95f4',dataIndex:'submittedAt',render:(v:any)=>safe(v,'\u672a\u63d0\u4ea4')},{title:'\u7b49\u5f85\u65f6\u957f',render:(_:any,r:any)=>r.status==='SUBMITTED'?<>{safe(r.waitingMinutes,0)} {T.minute} {Number(r.waitingMinutes||0)>=1440&&<Tag color="orange">{T.overdue}</Tag>}</>:'-'},{title:'\u72b6\u6001',dataIndex:'status',render:(v:any)=><Tag color={v==='SUBMITTED'?'blue':v==='REJECTED'?'red':v==='POSTED'?'green':'default'}>{statusText[v]||safe(v)}</Tag>},{title:'\u64cd\u4f5c',render:(_:any,r:any)=><Button size="small" onClick={()=>open(r.id)}>{T.details}</Button>}];
-  return <div className="approvals-page"><div className="page-heading"><div><Typography.Title level={2}>{T.title}</Typography.Title><Typography.Text type="secondary">{T.description}</Typography.Text></div><Button icon={<ReloadOutlined/>} onClick={load}>{T.refresh}</Button></div>
-    <Row gutter={[12,12]} className="approval-stats">{statistics.map(([title,key,color])=><Col xs={12} sm={8} lg={4} key={key}><Card hoverable onClick={()=>setTab(key==='pendingMine'?'pendingMine':key==='pendingAll'||key==='overdue'?'pendingAll':key==='approvedToday'||key==='approvedMonth'?'approved':'rejected')}><Statistic title={title} value={Number(stats[key]||0)} valueStyle={{color:color||undefined}}/></Card></Col>)}</Row>
-    <Card className="approval-workbench" title={<Space><SafetyCertificateOutlined/>{T.workbench}</Space>} extra={canReject&&selected.length?<Button danger icon={<CloseOutlined/>} onClick={()=>setRejecting('batch')}>{T.batchReject} ({selected.length})</Button>:null}>
-      <div className="approval-tabs">{tabs.map(([key,label])=><Button key={key} type={tab===key?'primary':'text'} onClick={()=>setTab(key)}>{label}</Button>)}</div>
-      <Space wrap className="approval-filters"><Input placeholder={T.keyword} allowClear onChange={e=>setFilters((f:any)=>({...f,keyword:e.target.value}))}/><Select allowClear placeholder={T.documentType} style={{minWidth:160}} options={Object.entries(statusText).filter(([k])=>k.includes('_')).map(([value,label])=>({value,label}))} onChange={v=>setFilters((f:any)=>({...f,documentType:v}))}/><Select allowClear placeholder={T.status} style={{minWidth:110}} options={['SUBMITTED','POSTED','REJECTED','VOIDED'].map(value=>({value,label:statusText[value]}))} onChange={v=>setFilters((f:any)=>({...f,status:v}))}/><Button onClick={()=>setFilters({})}>{T.reset}</Button></Space>
-      <Table rowKey="id" loading={loading} columns={columns} dataSource={data.items||[]} scroll={{x:1050}} pagination={{total:data.total||0,pageSize:20}} rowSelection={canReject?{selectedRowKeys:selected,onChange:v=>setSelected(v as string[]),getCheckboxProps:(r:any)=>({disabled:r.status!=='SUBMITTED'})}:undefined}/>
+  const mobile=useIsMobile();
+  const [mode,setMode]=useState<'approval'|'defective'|'records'>('approval');
+  const [tab,setTab]=useState('pendingMine');
+  const [stats,setStats]=useState<any>({});
+  const [data,setData]=useState<any>({items:[],total:0});
+  const [loading,setLoading]=useState(false);
+  const [selected,setSelected]=useState<string[]>([]);
+  const [detail,setDetail]=useState<any>();
+  const [drawer,setDrawer]=useState(false);
+  const [filters,setFilters]=useState<any>({});
+  const [rejecting,setRejecting]=useState<'batch'|'single'>();
+  const [allocationOpen,setAllocationOpen]=useState(false);
+  const [processing,setProcessing]=useState<any>();
+  const [rejectForm]=Form.useForm();
+  const [allocationForm]=Form.useForm();
+  const [processForm]=Form.useForm();
+  const canApprove=user.role==='ADMIN'||Boolean(user.permissions?.includes('approval.approve'));
+  const canReject=user.role==='ADMIN'||Boolean(user.permissions?.includes('approval.reject'));
+  const canViewDefective=user.role==='ADMIN'||Boolean(user.permissions?.includes('approval.defective.view'));
+  const canProcess=user.role==='ADMIN'||Boolean(user.permissions?.includes('approval.defective.process'));
+
+  const load=async()=>{
+    setLoading(true);
+    try {
+      if(mode==='approval'){
+        const query=new URLSearchParams({tab,page:'1',pageSize:'20',...Object.fromEntries(Object.entries(filters).filter(([,v])=>v!==undefined&&v!=='')) as Record<string,string>});
+        const [summary,list]=await Promise.all([api('/approvals/statistics'),api(`/approvals?${query}`)]);
+        setStats(summary||{});setData(list||{items:[],total:0});
+      } else {
+        const query=new URLSearchParams({page:'1',pageSize:'50',...Object.fromEntries(Object.entries(filters).filter(([,v])=>v!==undefined&&v!=='')) as Record<string,string>});
+        setData(await api(`/approvals/${mode==='defective'?'defective-items':'defective-records'}?${query}`));
+      }
+    } catch(error:any){message.error(error.message||'审核中心加载失败');}
+    finally{setLoading(false);}
+  };
+  useEffect(()=>{void load();const timer=window.setInterval(load,60000);return()=>clearInterval(timer);},[mode,tab,JSON.stringify(filters)]);
+
+  const open=async(id:string)=>{try{setDetail(await api(`/approvals/${id}`));setDrawer(true);}catch(error:any){message.error(error.message);}};
+  const submitApprove=async(payload:any={})=>{
+    if(!detail)return;
+    try{
+      await api(`/approvals/${detail.id}/approve`,{method:'POST',headers:{'Idempotency-Key':idempotencyKey()},body:JSON.stringify(payload)});
+      message.success('审核通过，库存已过账');setDrawer(false);setAllocationOpen(false);void load();
+    }catch(error:any){message.error(error.message);}
+  };
+  const approve=()=>{
+    if(!detail)return;
+    if(receiptTypes.includes(detail.documentType)){
+      const options=detail.allocationOptions||[];
+      allocationForm.setFieldsValue({allocations:(detail.lines||[]).map((line:any)=>{
+        const normalType=line.itemType==='MATERIAL'?'RAW':'FG';
+        const normalTargets=options.filter((row:any)=>row.warehouseType===normalType);
+        const preferred=normalTargets.find((row:any)=>row.warehouseId===detail.warehouseId&&row.locationId===line.locationId)||normalTargets[0];
+        return {documentLineId:line.id,normalQty:Number(line.quantity),defectiveQty:0,normalWarehouseId:preferred?.warehouseId,normalLocationId:preferred?.locationId};
+      })});
+      setAllocationOpen(true);return;
+    }
+    Modal.confirm({title:'确认审核通过并立即过账？',content:'库存余额与不可修改流水将在同一事务内更新。',onOk:()=>submitApprove()});
+  };
+  const saveAllocations=async(values:any)=>{
+    const payload:any[]=[];
+    for(const row of values.allocations||[]){
+      const line=detail.lines.find((item:any)=>item.id===row.documentLineId);
+      const normal=Number(row.normalQty||0),defective=Number(row.defectiveQty||0),total=Number(line.quantity);
+      if(!Number.isInteger(normal)||!Number.isInteger(defective)||normal<0||defective<0||normal+defective!==total){message.error(`${line.itemCode} 的正常品与不良品数量之和必须等于 ${formatQuantity(total)}`);return;}
+      if(normal>0&&(!row.normalWarehouseId||!row.normalLocationId)){message.error(`${line.itemCode} 请选择正常入库仓库和库位`);return;}
+      if(defective>0&&(!row.defectiveWarehouseId||!row.defectiveLocationId||!String(row.defectReason||'').trim())){message.error(`${line.itemCode} 请选择不良品仓库、库位并填写不良原因`);return;}
+      if(normal>0)payload.push({documentLineId:line.id,disposition:'NORMAL',warehouseId:row.normalWarehouseId,locationId:row.normalLocationId,batchId:line.batchId||undefined,quantity:String(normal)});
+      if(defective>0)payload.push({documentLineId:line.id,disposition:'DEFECTIVE',warehouseId:row.defectiveWarehouseId,locationId:row.defectiveLocationId,batchId:line.batchId||undefined,quantity:String(defective),defectReason:String(row.defectReason).trim()});
+    }
+    await submitApprove({receiptAllocations:payload});
+  };
+  const reject=async(values:any)=>{
+    const ids=rejecting==='batch'?selected:detail?[detail.id]:[];
+    if(!ids.length)return;
+    try{
+      const path=rejecting==='batch'?'/approvals/batch-reject':`/approvals/${ids[0]}/reject`;
+      const body=rejecting==='batch'?{documentIds:ids,...values}:values;
+      await api(path,{method:'POST',headers:{'Idempotency-Key':idempotencyKey()},body:JSON.stringify(body)});
+      message.success('已驳回');setRejecting(undefined);setDrawer(false);setSelected([]);rejectForm.resetFields();void load();
+    }catch(error:any){message.error(error.message);}
+  };
+  const process=async(values:any)=>{
+    try{
+      await api(`/approvals/defective-items/${processing.id}/process`,{method:'POST',headers:{'Idempotency-Key':idempotencyKey()},body:JSON.stringify({...values,quantity:String(values.quantity)})});
+      message.success('不良品处理完成');setProcessing(undefined);processForm.resetFields();void load();window.dispatchEvent(new Event('inventory:refresh'));
+    }catch(error:any){message.error(error.message);}
+  };
+
+  const approvalColumns:any[]=[
+    {title:'单据编号',dataIndex:'documentNo',render:(value:any,row:any)=><Button type="link" onClick={()=>open(row.id)}>{safe(value,'未生成单号')}</Button>},
+    {title:'业务类型',dataIndex:'documentType',render:docName},{title:'仓库',render:(_:any,row:any)=>`${safe(row.warehouseCode)} ${safe(row.warehouseName,'')}`},
+    {title:'提交人',dataIndex:'submitterName',render:(value:any)=>safe(value,'未知')},{title:'提交时间',dataIndex:'submittedAt',render:formatBeijingTime},
+    {title:'等待时长',render:(_:any,row:any)=>row.status==='SUBMITTED'?<>{safe(row.waitingMinutes,0)} 分钟 {Number(row.waitingMinutes||0)>=1440&&<Tag color="orange">超时</Tag>}</>:'-'},
+    {title:'状态',dataIndex:'status',render:(value:any)=><Tag color={value==='SUBMITTED'?'blue':value==='REJECTED'?'red':value==='POSTED'?'green':'default'}>{statusText[value]||safe(value)}</Tag>},
+    {title:'操作',render:(_:any,row:any)=><Button size="small" onClick={()=>open(row.id)}>详情</Button>},
+  ];
+  const defectiveColumns:any[]=[
+    {title:'物料',render:(_:any,row:any)=>`${row.itemCode} ${row.itemName}`},{title:'类型',dataIndex:'itemType',render:(value:string)=>value==='MATERIAL'?'原材料':'成品'},
+    {title:'不良品库位',render:(_:any,row:any)=>`${row.warehouseCode} / ${row.locationCode}`},{title:'来源单据',dataIndex:'sourceDocumentNo',render:safe},
+    {title:'不良原因',dataIndex:'defectReason'},{title:'剩余数量',render:(_:any,row:any)=>`${formatQuantity(row.remainingQty)} ${row.unit}`},
+    {title:'入库时间',dataIndex:'createdAt',render:formatBeijingTime},{title:'操作',render:(_:any,row:any)=>canProcess?<Button type="primary" size="small" onClick={()=>{setProcessing(row);processForm.resetFields();processForm.setFieldsValue({quantity:Number(row.remainingQty),action:row.itemType==='MATERIAL'?'RETURN':'RETURN_PRODUCTION',productionOrderId:row.productionOrderId});}}>处理</Button>:'-'},
+  ];
+  const recordColumns:any[]=[
+    {title:'处理单号',dataIndex:'documentNo'},{title:'物料',render:(_:any,row:any)=>`${row.itemCode} ${row.itemName}`},{title:'处理方式',dataIndex:'action',render:(value:string)=>actionText[value]||value},
+    {title:'数量',render:(_:any,row:any)=>`${formatQuantity(row.quantity)} ${row.unit}`},{title:'处理意见',dataIndex:'reason'},
+    {title:'目标',render:(_:any,row:any)=>row.productionOrderNo||[row.targetWarehouseCode,row.targetLocationCode].filter(Boolean).join(' / ')||'-'},
+    {title:'处理人',dataIndex:'processedByName',render:safe},{title:'处理时间',dataIndex:'createdAt',render:formatBeijingTime},
+  ];
+  const statistics:[string,string,string][]=[['待我审核','pendingMine',''],['范围内待审','pendingAll',''],['今日已审核','approvedToday','green'],['今日已驳回','rejectedToday','red'],['超时待审核','overdue','orange'],['本月已审核','approvedMonth','green']];
+  const allocationOptions=detail?.allocationOptions||data.allocationOptions||[];
+  const warehouseOptions=(type:string)=>Array.from(new Map(allocationOptions.filter((row:any)=>row.warehouseType===type).map((row:any)=>[row.warehouseId,{value:row.warehouseId,label:`${row.warehouseCode} ${row.warehouseName}`}])).values());
+  const locationOptions=(warehouseId:string)=>allocationOptions.filter((row:any)=>row.warehouseId===warehouseId).map((row:any)=>({value:row.locationId,label:`${row.zoneCode} / ${row.locationCode} ${row.locationName||''}`}));
+
+  return <div className="approvals-page">
+    <div className="page-heading"><div><Typography.Title level={2}>审核中心</Typography.Title><Typography.Text type="secondary">所有库存审核与不良品处置统一在此处理。</Typography.Text></div><Button icon={<ReloadOutlined/>} onClick={load}>刷新</Button></div>
+    <Space wrap style={{marginBottom:16}}><Button type={mode==='approval'?'primary':'default'} onClick={()=>{setMode('approval');setFilters({});}}>单据审核</Button>{canViewDefective&&<><Button type={mode==='defective'?'primary':'default'} onClick={()=>{setMode('defective');setFilters({});}}>待处理不良品</Button><Button type={mode==='records'?'primary':'default'} onClick={()=>{setMode('records');setFilters({});}}>不良品处理记录</Button></>}</Space>
+    {mode==='approval'&&<Row gutter={[12,12]} className="approval-stats">{statistics.map(([title,key,color])=><Col xs={12} sm={8} lg={4} key={key}><Card hoverable onClick={()=>setTab(key==='pendingMine'?'pendingMine':key==='pendingAll'||key==='overdue'?'pendingAll':key==='approvedToday'||key==='approvedMonth'?'approved':'rejected')}><Statistic title={title} value={Number(stats[key]||0)} valueStyle={{color:color||undefined}}/></Card></Col>)}</Row>}
+    <Card className="approval-workbench" title={<Space><SafetyCertificateOutlined/>{mode==='approval'?'审核工作台':mode==='defective'?'不良品处理工作台':'不良品处理记录'}</Space>} extra={mode==='approval'&&canReject&&selected.length?<Button danger icon={<CloseOutlined/>} onClick={()=>setRejecting('batch')}>批量驳回 ({selected.length})</Button>:null}>
+      {mode==='approval'&&<div className="approval-tabs">{approvalTabs.map(([key,label])=><Button key={key} type={tab===key?'primary':'text'} onClick={()=>setTab(key)}>{label}</Button>)}</div>}
+      <Space wrap className="approval-filters"><Input placeholder={mode==='approval'?'单号 / 物料':'物料 / 来源单据'} allowClear onChange={event=>setFilters((value:any)=>({...value,keyword:event.target.value}))}/>{mode!=='approval'&&<Select allowClear placeholder="物料类型" options={[{value:'MATERIAL',label:'原材料'},{value:'FINISHED_GOOD',label:'成品'}]} onChange={value=>setFilters((current:any)=>({...current,itemType:value}))}/>}<Button onClick={()=>setFilters({})}>重置</Button></Space>
+      <Table rowKey="id" loading={loading} columns={mode==='approval'?approvalColumns:mode==='defective'?defectiveColumns:recordColumns} dataSource={data.items||[]} scroll={{x:1000}} pagination={{total:data.total||0,pageSize:mode==='approval'?20:50}} rowSelection={mode==='approval'&&canReject?{selectedRowKeys:selected,onChange:value=>setSelected(value as string[]),getCheckboxProps:(row:any)=>({disabled:row.status!=='SUBMITTED'})}:undefined}/>
     </Card>
-    <Drawer title={`${T.detailTitle} - ${safe(detail?.documentNo,T.noNumber)}`} width={mobile?'100%':800} open={drawer} onClose={()=>setDrawer(false)} footer={<Space style={{display:'flex',justifyContent:'flex-end'}}><Button onClick={()=>setDrawer(false)}>{T.close}</Button>{detail?.status==='SUBMITTED'&&canReject&&<Button danger onClick={()=>setRejecting('single')}>{T.reject}</Button>}{detail?.status==='SUBMITTED'&&canApprove&&<Button type="primary" icon={<CheckOutlined/>} onClick={()=>Modal.confirm({title:'确认审核通过？',content:'通过后将按本单据明细统一过账，库存余额与不可修改流水会同步更新。',onOk:approve})}>{T.approve}</Button>}</Space>}>
-      {detail&&<><Descriptions column={mobile?1:2} bordered size="small"><Descriptions.Item label={T.documentType}>{docName(detail.documentType)}</Descriptions.Item><Descriptions.Item label={T.status}>{statusText[detail.status]||detail.status}</Descriptions.Item><Descriptions.Item label={T.warehouse}>{safe(detail.warehouseCode,'\u672a\u547d\u540d\u4ed3\u5e93')} {safe(detail.warehouseName,'')}</Descriptions.Item><Descriptions.Item label={T.submittedAt}>{safe(detail.submittedAt,'\u672a\u63d0\u4ea4')}</Descriptions.Item><Descriptions.Item label={T.notes} span={2}>{safe(detail.notes,'\u65e0')}</Descriptions.Item></Descriptions><Table className="approval-line-table" size="small" rowKey="id" pagination={false} dataSource={detail.lines||[]} columns={[{title:T.item,render:(_:any,r:any)=>`${safe(r.itemCode,'\u672a\u7f16\u7801')} ${safe(r.itemName,'\u672a\u547d\u540d\u7269\u6599')}`},{title:T.location,render:(_:any,r:any)=>safe(r.locationCode,'\u672a\u547d\u540d\u5e93\u4f4d')},{title:T.batch,dataIndex:'batchNo',render:(v:any)=>safe(v,'-')},{title:T.quantity,dataIndex:'quantity',render:(v:any,r:any)=>`${safe(v,0)} ${safe(r.unit,'')}`}]}/>{detail.rejectionReason&&<Card size="small" className="reject-reason">{T.reason}：{detail.rejectionReason}</Card>}</>}
+
+    <Drawer title={`审核详情 - ${safe(detail?.documentNo,'未生成单号')}`} width={mobile?'100%':900} open={drawer} onClose={()=>setDrawer(false)} footer={<Space style={{display:'flex',justifyContent:'flex-end'}}><Button onClick={()=>setDrawer(false)}>关闭</Button>{detail?.status==='SUBMITTED'&&canReject&&<Button danger onClick={()=>setRejecting('single')}>驳回</Button>}{detail?.status==='SUBMITTED'&&canApprove&&<Button type="primary" icon={<CheckOutlined/>} onClick={approve}>审核通过</Button>}</Space>}>
+      {detail&&<><Descriptions column={mobile?1:2} bordered size="small" items={[{label:'业务类型',children:docName(detail.documentType)},{label:'状态',children:statusText[detail.status]||detail.status},{label:'送审意向仓库',children:`${safe(detail.warehouseCode)} ${safe(detail.warehouseName,'')}`},{label:'提交时间',children:formatBeijingTime(detail.submittedAt)},{label:'来源业务',children:safe(detail.sourceDocumentNo)},{label:'备注',children:safe(detail.notes)}]}/><Table size="small" rowKey="id" pagination={false} dataSource={detail.lines||[]} columns={[{title:'物料',render:(_:any,row:any)=>`${row.itemCode} ${row.itemName}`},{title:'原库位',dataIndex:'locationCode'},{title:'批次',dataIndex:'batchNo',render:safe},{title:'数量',render:(_:any,row:any)=>`${formatQuantity(row.quantity)} ${row.unit}`}]} style={{marginTop:16}}/>{detail.receiptAllocations?.length>0&&<Table size="small" rowKey={(row:any)=>`${row.documentLineId}-${row.disposition}-${row.locationId}`} pagination={false} dataSource={detail.receiptAllocations} columns={[{title:'分配',dataIndex:'disposition',render:(value:string)=>value==='NORMAL'?'正常品':'不良品'},{title:'仓库',dataIndex:'warehouseCode'},{title:'库位',dataIndex:'locationCode'},{title:'数量',dataIndex:'quantity',render:formatQuantity},{title:'不良原因',dataIndex:'defectReason',render:safe}]} style={{marginTop:16}}/>}</>}
     </Drawer>
-    <Modal title={rejecting==='batch'?T.batchRejectTitle:T.rejectTitle} open={Boolean(rejecting)} onCancel={()=>setRejecting(undefined)} onOk={()=>form.submit()} okText={T.confirmReject} okButtonProps={{danger:true}}><Form form={form} layout="vertical" onFinish={reject}><Form.Item name="reasonCode" label={T.commonReason}><Select allowClear options={reasons.map(value=>({value,label:value}))}/></Form.Item><Form.Item name="reason" label={T.reason} rules={[{required:true,message:'\u8bf7\u586b\u5199\u9a73\u56de\u539f\u56e0'},{max:500,message:'\u6700\u591a 500 \u5b57'}]}><Input.TextArea rows={4} maxLength={500}/></Form.Item></Form></Modal>
+
+    <Modal width={850} title="入库审核分配" open={allocationOpen} onCancel={()=>setAllocationOpen(false)} onOk={()=>allocationForm.submit()} okText="审核通过并过账">
+      <Typography.Paragraph type="secondary">每条明细可全部正常入库或按整数数量拆分；不良品必须填写原因。</Typography.Paragraph>
+      <Form form={allocationForm} layout="vertical" onFinish={saveAllocations}><Form.List name="allocations">{fields=><Space direction="vertical" style={{width:'100%'}}>{fields.map((field,index)=>{
+        const line=detail?.lines?.[index]||{};const normalType=line.itemType==='MATERIAL'?'RAW':'FG';
+        return <Card key={field.key} size="small" title={`${line.itemCode} ${line.itemName} · 送审 ${formatQuantity(line.quantity)} ${line.unit||''}`}>
+          <Form.Item name={[field.name,'documentLineId']} hidden><Input/></Form.Item>
+          <Button size="small" onClick={()=>allocationForm.setFieldValue(['allocations',field.name],{...allocationForm.getFieldValue(['allocations',field.name]),normalQty:Number(line.quantity),defectiveQty:0,defectReason:undefined})}>全部正常</Button>
+          <Row gutter={12} style={{marginTop:8}}>
+            <Col xs={24} md={8}><Form.Item label="正常数量" name={[field.name,'normalQty']} rules={[{required:true}]}><InputNumber min={0} precision={0} style={{width:'100%'}}/></Form.Item></Col>
+            <Col xs={24} md={8}><Form.Item label="正常仓库" name={[field.name,'normalWarehouseId']}><Select options={warehouseOptions(normalType)} onChange={()=>allocationForm.setFieldValue(['allocations',field.name,'normalLocationId'],undefined)}/></Form.Item></Col>
+            <Col xs={24} md={8}><Form.Item noStyle shouldUpdate>{({getFieldValue})=><Form.Item label="正常库位" name={[field.name,'normalLocationId']}><Select options={locationOptions(getFieldValue(['allocations',field.name,'normalWarehouseId']))}/></Form.Item>}</Form.Item></Col>
+            <Col xs={24} md={8}><Form.Item label="不良数量" name={[field.name,'defectiveQty']} rules={[{required:true}]}><InputNumber min={0} precision={0} style={{width:'100%'}}/></Form.Item></Col>
+            <Col xs={24} md={8}><Form.Item label="不良品仓库" name={[field.name,'defectiveWarehouseId']}><Select allowClear options={warehouseOptions('DEFECTIVE')} onChange={()=>allocationForm.setFieldValue(['allocations',field.name,'defectiveLocationId'],undefined)}/></Form.Item></Col>
+            <Col xs={24} md={8}><Form.Item noStyle shouldUpdate>{({getFieldValue})=><Form.Item label="不良品库位" name={[field.name,'defectiveLocationId']}><Select allowClear options={locationOptions(getFieldValue(['allocations',field.name,'defectiveWarehouseId']))}/></Form.Item>}</Form.Item></Col>
+            <Col span={24}><Form.Item label="不良原因" name={[field.name,'defectReason']}><Input.TextArea maxLength={500} rows={2}/></Form.Item></Col>
+          </Row>
+        </Card>;
+      })}</Space>}</Form.List></Form>
+    </Modal>
+
+    <Modal title="处理不良品" open={Boolean(processing)} onCancel={()=>setProcessing(undefined)} onOk={()=>processForm.submit()} okText="确认处理">
+      {processing&&<Form form={processForm} layout="vertical" onFinish={process}>
+        <Descriptions size="small" column={1} items={[{label:'物料',children:`${processing.itemCode} ${processing.itemName}`},{label:'可处理数量',children:`${formatQuantity(processing.remainingQty)} ${processing.unit}`},{label:'不良原因',children:processing.defectReason}]}/>
+        <Form.Item label="处理方式" name="action" rules={[{required:true}]}><Select options={processing.itemType==='MATERIAL'?[{value:'RETURN',label:'退货'},{value:'REPAIR_RESTOCK',label:'维修重新入库'}]:[{value:'RETURN_PRODUCTION',label:'退回生产任务'}]}/></Form.Item>
+        <Form.Item label="处理数量" name="quantity" rules={[{required:true}]}><InputNumber min={1} max={Number(processing.remainingQty)} precision={0} style={{width:'100%'}}/></Form.Item>
+        <Form.Item noStyle shouldUpdate>{({getFieldValue})=>getFieldValue('action')==='REPAIR_RESTOCK'?<><Form.Item label="目标原材料仓库" name="targetWarehouseId" rules={[{required:true}]}><Select options={warehouseOptions('RAW')} onChange={()=>processForm.setFieldValue('targetLocationId',undefined)}/></Form.Item><Form.Item label="目标库位" name="targetLocationId" rules={[{required:true}]}><Select options={locationOptions(getFieldValue('targetWarehouseId'))}/></Form.Item></>:null}</Form.Item>
+        {processing.itemType==='FINISHED_GOOD'&&<Form.Item label="生产任务" name="productionOrderId" rules={[{required:true}]}><Select disabled={Boolean(processing.productionOrderId)} options={(data.productionOrders||[]).filter((row:any)=>row.itemId===processing.itemId&&Number(row.availableCompletionQty)>=Number(processForm.getFieldValue('quantity')||1)).map((row:any)=>({value:row.id,label:`${row.orderNo}（待完工 ${formatQuantity(row.availableCompletionQty)}）`}))}/></Form.Item>}
+        <Form.Item label={processing.itemType==='MATERIAL'?'处理原因 / 维修说明':'处理意见'} name="reason" rules={[{required:true},{max:500}]}><Input.TextArea rows={4} maxLength={500}/></Form.Item>
+      </Form>}
+    </Modal>
+
+    <Modal title={rejecting==='batch'?'批量驳回':'驳回单据'} open={Boolean(rejecting)} onCancel={()=>setRejecting(undefined)} onOk={()=>rejectForm.submit()} okText="确认驳回" okButtonProps={{danger:true}}><Form form={rejectForm} layout="vertical" onFinish={reject}><Form.Item name="reasonCode" label="常用原因"><Select allowClear options={rejectReasons.map(value=>({value,label:value}))}/></Form.Item><Form.Item name="reason" label="驳回原因" rules={[{required:true},{max:500}]}><Input.TextArea rows={4} maxLength={500}/></Form.Item></Form></Modal>
   </div>;
 }
