@@ -299,7 +299,19 @@ describe('库存管理固定验收场景',()=>{
 
   it('V1.1.0 主数据、动态角色、审批状态和库存调整可完整运行',async()=>{
     const version=await request(app.getHttpServer()).get('/api/system/version').expect(200);
-    expect(version.body.data.version).toBe('1.3.0');
+    expect(version.body.data.version).toBe('1.3.1');
+
+    const [adminRole]=await db.query(`SELECT id FROM roles WHERE code='ADMIN'`);
+    const legacyUser=await request(app.getHttpServer()).post('/api/users').set(auth(admin)).send({
+      username:'legacy-name-user',name:'旧客户端姓名',roleId:adminRole.id,password:'68182170',
+    }).expect(201);
+    expect(legacyUser.body.data.employeeName).toBe('旧客户端姓名');
+    const canonicalUser=await request(app.getHttpServer()).post('/api/users').set(auth(admin)).send({
+      username:'employee-name-user',employeeName:'新客户端姓名',roleId:adminRole.id,password:'68182170',
+    }).expect(201);
+    expect(canonicalUser.body.data.employeeName).toBe('新客户端姓名');
+    await request(app.getHttpServer()).post(`/api/users/${legacyUser.body.data.id}/delete`).set(auth(admin)).send({}).expect(201);
+    await request(app.getHttpServer()).post(`/api/users/${canonicalUser.body.data.id}/delete`).set(auth(admin)).send({}).expect(201);
 
     const category=await request(app.getHttpServer()).post('/api/item-categories').set(auth(admin)).send({code:'TEST-CAT',name:'测试分类',itemType:'MATERIAL',sortOrder:10}).expect(201);
     const finishedCategory=await request(app.getHttpServer()).post('/api/item-categories').set(auth(warehouse)).send({code:'TEST-CAT',name:'成品测试分类',itemType:'FINISHED_GOOD'}).expect(201);

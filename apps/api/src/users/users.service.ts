@@ -43,10 +43,11 @@ export class UsersService {
 
   async create(dto: any, userId: string, operator: AuthUser) {
     try {
+      const employeeName = dto.employeeName?.trim() || dto.name?.trim();
       if (!dto.password || dto.password.length < 8) {
         throw new BusinessException('VALIDATION_ERROR', '密码至少需要 8 位');
       }
-      if (!dto.employeeName?.trim()) {
+      if (!employeeName) {
         throw new BusinessException('VALIDATION_ERROR', '人员姓名不能为空');
       }
       const hash = await bcrypt.hash(dto.password, 12);
@@ -58,8 +59,8 @@ export class UsersService {
         `INSERT INTO users(username,name,password_hash,role,role_id,employee_name,employee_no,department,position,phone,email,remarks)
          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
          RETURNING id,username,name,role,role_id "roleId",status,employee_name "employeeName"`,
-        [dto.username.trim(), dto.employeeName.trim(), hash, role.code, role.id,
-          dto.employeeName.trim(), dto.employeeNo?.trim() || null, dto.department?.trim() || null,
+        [dto.username.trim(), employeeName, hash, role.code, role.id,
+          employeeName, dto.employeeNo?.trim() || null, dto.department?.trim() || null,
           dto.position?.trim() || null, dto.phone?.trim() || null, dto.email?.trim() || null,
           dto.remarks?.trim() || null],
       );
