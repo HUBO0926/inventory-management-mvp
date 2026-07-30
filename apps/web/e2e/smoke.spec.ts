@@ -44,7 +44,42 @@ test('管理员可切换主题并查看构建版本', async ({ page }, testInfo)
   await login(page, 'admin');
   await page.getByLabel('切换浅色/深色主题').click();
   await expect.poll(() => page.evaluate(() => document.documentElement.dataset.theme)).toBe('dark');
-  await expect(page.getByText('V1.3.0', { exact: true })).toBeVisible();
+  await expect(page.getByText('V1.3.1', { exact: true })).toBeVisible();
+});
+
+test('管理员新增账号时姓名字段可通过参数校验', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop-chromium');
+  await login(page, 'admin');
+  await page.goto('/users');
+  await page.getByRole('button', { name: '新增账号' }).click();
+  const dialog = page.getByRole('dialog');
+  const username = `NJHE2E${Date.now()}`;
+  await dialog.getByLabel('账号').fill(username);
+  await dialog.getByLabel('姓名').fill('参数校验测试');
+  const roleSelect = dialog.getByLabel('角色');
+  await roleSelect.click();
+  await roleSelect.press('ArrowDown');
+  await roleSelect.press('Enter');
+  await dialog.getByLabel('初始密码').fill('68182170');
+  const createResponse = page.waitForResponse(response =>
+    response.url().endsWith('/api/users') && response.request().method() === 'POST',
+  );
+  await page.getByRole('button', { name: /确\s*定/ }).click();
+  const response = await createResponse;
+  expect(response.status()).toBe(201);
+  const payload = response.request().postDataJSON();
+  expect(payload.employeeName).toBe('参数校验测试');
+  expect(payload).not.toHaveProperty('name');
+  const created = (await response.json()).data;
+  await expect(page.getByText('账号已创建')).toBeVisible();
+  await expect(page.getByRole('cell', { name: username })).toBeVisible();
+  await page.evaluate(async id => {
+    const authToken = localStorage.getItem('inventory_token');
+    await fetch(`/api/users/${id}/delete`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${authToken}` },
+    });
+  }, created.id);
 });
 
 test('管理员主要路由无白屏、脚本错误和整体横向溢出', async ({ page }) => {

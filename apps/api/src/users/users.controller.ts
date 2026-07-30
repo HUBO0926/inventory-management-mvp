@@ -7,7 +7,8 @@ import { UsersService } from './users.service';
 
 class CreateUserDto {
   @IsString() @MaxLength(50) username: string;
-  @IsString() @MaxLength(100) employeeName: string;
+  @IsOptional() @IsString() @MaxLength(100) employeeName?: string;
+  @IsOptional() @IsString() @MaxLength(100) name?: string;
   @IsString() roleId: string;
   @IsString() @MinLength(8) @MaxLength(100) password: string;
   @IsOptional() @IsString() @MaxLength(50) employeeNo: string;

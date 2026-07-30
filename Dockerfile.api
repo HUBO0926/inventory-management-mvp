@@ -9,7 +9,7 @@ COPY apps/api apps/api
 RUN pnpm --filter @inventory/api build
 
 FROM node:22-alpine
-ARG APP_VERSION=1.3.0
+ARG APP_VERSION=1.3.1
 ARG BUILD_TIME=unknown
 ARG GIT_COMMIT=unknown
 ENV APP_VERSION=$APP_VERSION BUILD_TIME=$BUILD_TIME GIT_COMMIT=$GIT_COMMIT
