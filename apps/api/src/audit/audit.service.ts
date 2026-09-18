@@ -21,7 +21,7 @@ export class AuditService {
       [
         userId, action, entityType, entityId || null,
         details ? JSON.stringify(details) : null,
-        process.env.APP_VERSION || '1.3.1',
+        process.env.APP_VERSION || '1.7.0',
       ],
     );
   }

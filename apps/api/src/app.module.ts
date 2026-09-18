@@ -18,6 +18,8 @@ import { MasterDataModule } from './master-data/master-data.module';
 import { SystemModule } from './system/system.module';
 import { AuditRequestInterceptor } from './audit/audit-request.interceptor';
 import { ApprovalsModule } from './approvals/approvals.module';
+import { NotificationsModule } from './notifications/notifications.module';
+import { ApprovalWorkflowModule } from './approvals/approval-workflow.module';
 
 @Module({
   imports:[
@@ -33,7 +35,7 @@ import { ApprovalsModule } from './approvals/approvals.module';
           synchronize: false,
           logging: process.env.DB_LOGGING === 'true',
         }),
-    AuditModule,AuthModule,UsersModule,ItemsModule,WarehousesModule,BomsModule,InventoryModule,StockDocumentsModule,ProductionModule,DashboardModule,MasterDataModule,SystemModule,ApprovalsModule,
+    AuditModule,ApprovalWorkflowModule,AuthModule,UsersModule,ItemsModule,WarehousesModule,BomsModule,InventoryModule,StockDocumentsModule,ProductionModule,DashboardModule,MasterDataModule,SystemModule,ApprovalsModule,NotificationsModule,
   ],
   controllers:[HealthController],
   providers:[

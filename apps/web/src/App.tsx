@@ -27,25 +27,27 @@ import {
 import { Avatar, Badge, Button, Card, Drawer, Dropdown, Form, Input, Layout, Menu, Space, Spin, Tag, Tooltip, Typography, message } from 'antd';
 import type { MenuProps } from 'antd';
 import { Navigate, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
-import { api } from './api';
+import { ApiError, api } from './api';
 import { canAccessRole, statusText } from './domain';
 import { DashboardPage } from './dashboard';
 import { BomsPage } from './bom-page';
 import { ProductionPage } from './production-list-page';
 import { useIsMobile } from './responsive';
-import { AuditPage, BatchesPage, LocationsPage, RolesPage, SimpleMasterPage, StockDocumentsV110Page, UsersV110Page, WarehousesPage } from './v110-pages';
+import { AuditPage, BatchesPage, RolesPage, SimpleMasterPage, StockDocumentsV110Page, UsersV110Page, WarehousesPage } from './v110-pages';
 import { WarehouseVirtualMapPage } from './virtual-warehouse-page';
+import { WarehouseManagementPage } from './warehouse-management-page';
 import { WarehouseArchivePage } from './warehouse-archive-page';
 import { MaterialDetailPage, MaterialFormPage, MaterialListPage } from './material-pages';
 import { MaterialCategoriesPage } from './material-categories';
 import { ApprovalsPage } from './approvals-page';
 import { ProductionPickingPage } from './production-picking-page';
 import { InventoryManagementPage } from './inventory-management-page';
+import { NotificationsPage } from './notifications-page';
 
 const { Header, Sider, Content } = Layout;
 const { Title, Text } = Typography;
 
-export type User = { id: string; username: string; name: string; employeeName?: string; department?: string; position?: string; role: string; roleId?: string; permissions?: string[] };
+export type User = { id: string; username: string; name: string; employeeName?: string; department?: string; position?: string; role: string; roleId?: string; permissions?: string[]; isWarehouseManager?: boolean };
 export { statusText } from './domain';
 
 const roleText: Record<string, string> = { ADMIN: '系统管理员', WAREHOUSE: '仓库管理员', PRODUCTION: '生产人员' };
@@ -54,9 +56,11 @@ export const routes = [
   { key: '/', label: '库存驾驶舱', icon: <DashboardOutlined />, roles: ['ADMIN', 'WAREHOUSE', 'PRODUCTION'], permission: 'stock.view', group: 'cockpit' },
 
   // 库存中心
-  { key: '/warehouse-virtual', label: '虚拟仓库', icon: <DatabaseOutlined />, roles: ['ADMIN', 'WAREHOUSE', 'PRODUCTION'], permission: 'warehouse.virtual.view', group: 'stock' },
+  { key: '/virtual-warehouse', label: '虚拟仓库', icon: <DatabaseOutlined />, roles: ['ADMIN', 'WAREHOUSE', 'PRODUCTION'], permission: 'warehouse.virtual.view', group: 'stock' },
   { key: '/approvals', label: '审核中心', icon: <FileDoneOutlined />, roles: ['ADMIN', 'WAREHOUSE', 'PRODUCTION'], permission: 'approval.view-own', group: 'stock' },
+  { key: '/notifications', label: '消息中心', icon: <BellOutlined />, roles: ['ADMIN', 'WAREHOUSE', 'PRODUCTION'], group: 'stock' },
   { key: '/inventory/management', label: '库存管理', icon: <InboxOutlined />, roles: ['ADMIN', 'WAREHOUSE', 'PRODUCTION'], permission: 'inventory.view', permissionsAny: ['stock.view', 'inventory.view', 'inventory.report.view'], group: 'stock' },
+  { key: '/inventory/warehouse-management', label: '仓库管理', icon: <EnvironmentOutlined />, roles: ['ADMIN', 'WAREHOUSE'], permission: 'warehouse.capacity.view', permissionsAny: ['inventory.view'], hiddenForRoles: ['PRODUCTION'], group: 'stock' },
 
   // 生产中心
   { key: '/production/tasks', label: '生产任务', icon: <ToolOutlined />, roles: ['ADMIN', 'WAREHOUSE', 'PRODUCTION'], permission: 'production.view', group: 'production' },
@@ -65,7 +69,7 @@ export const routes = [
   { key: '/materials/raw', label: '原材料档案', icon: <AppstoreOutlined />, roles: ['ADMIN', 'WAREHOUSE', 'PRODUCTION'], permission: 'item.view', group: 'master' },
   { key: '/materials/finished', label: '成品档案', icon: <ImportOutlined />, roles: ['ADMIN', 'WAREHOUSE', 'PRODUCTION'], permission: 'item.view', group: 'master' },
   { key: '/material-categories', label: '物料分类', icon: <TagsOutlined />, roles: ['ADMIN', 'WAREHOUSE', 'PRODUCTION'], permission: 'category.view', group: 'master' },
-  { key: '/boms', label: 'BOM档案', icon: <ApartmentOutlined />, roles: ['ADMIN'], permission: 'bom.view', group: 'master' },
+  { key: '/boms', label: 'BOM档案', icon: <ApartmentOutlined />, roles: [], permission: 'bom.view', group: 'master' },
   { key: '/warehouse-archive', label: '仓储档案', icon: <EnvironmentOutlined />, roles: ['ADMIN'], permission: 'master.view', group: 'master' },
 
   // 系统管理
@@ -123,6 +127,11 @@ function LegacyItemRedirect() {
   return <Navigate to={id ? `/materials/${id}` : '/materials/raw'} replace />;
 }
 
+function PreserveQueryRedirect({ to }: { to: string }) {
+  const location = useLocation();
+  return <Navigate to={`${to}${location.search}`} replace />;
+}
+
 function LegacyInventoryRedirect({ tab }: { tab: 'documents' | 'flows' | 'reports' }) {
   const location = useLocation();
   const { id } = useParams();
@@ -153,13 +162,14 @@ function Shell({ user, onLogout }: { user: User; onLogout: () => void }) {
   const [systemVersion, setSystemVersion] = useState('');
   const currentPath = location.pathname.startsWith('/production/tasks') ? '/production/tasks'
     : location.pathname.startsWith('/inventory/management') ? '/inventory/management'
+      : location.pathname.startsWith('/inventory/warehouse-management') ? '/inventory/warehouse-management'
       : location.pathname;
   const currentRoute = routes.find(route => route.key === currentPath);
   const visibleKeys = visibleRouteKeysForRole(user.role);
-  const canOpen = (route: typeof routes[number]) => user.role === 'ADMIN'
+  const canOpen = (route: typeof routes[number]) => !('hiddenForRoles' in route && route.hiddenForRoles?.includes(user.role)) && (user.role === 'ADMIN'
     || visibleKeys.includes(route.key)
     || Boolean(route.permission && user.permissions?.includes(route.permission))
-    || Boolean('permissionsAny' in route && route.permissionsAny?.some(permission => user.permissions?.includes(permission)));
+    || Boolean('permissionsAny' in route && route.permissionsAny?.some(permission => user.permissions?.includes(permission))));
   const visible = routes.filter(canOpen);
   useEffect(() => { let alive=true; const refresh=async()=>{try{const s=await api('/approvals/statistics');if(alive)setApprovalCount(Number(s?.pendingMine||0));}catch{if(alive)setApprovalCount(0);}};void refresh();const timer=window.setInterval(refresh,60000);window.addEventListener('inventory:refresh',refresh);return()=>{alive=false;clearInterval(timer);window.removeEventListener('inventory:refresh',refresh);};},[user.id]);
   useEffect(() => {
@@ -260,9 +270,13 @@ function Shell({ user, onLogout }: { user: User; onLogout: () => void }) {
         <Content className="app-content">
           <Routes>
             <Route path="/" element={<DashboardPage user={user} />} />
-              <Route path="/warehouse-virtual" element={<WarehouseVirtualMapPage user={user} />} />
+              <Route path="/virtual-warehouse" element={<WarehouseVirtualMapPage user={user} />} />
+              <Route path="/warehouse-virtual" element={<PreserveQueryRedirect to="/virtual-warehouse" />} />
               <Route path="/approvals" element={<ApprovalsPage user={user} />} />
+              <Route path="/approvals/:id" element={<ApprovalsPage user={user} />} />
+              <Route path="/notifications" element={<NotificationsPage />} />
               <Route path="/inventory/management" element={<InventoryManagementPage user={user} />} />
+              <Route path="/inventory/warehouse-management" element={<WarehouseManagementPage user={user} />} />
               <Route path="/stock-documents" element={<LegacyInventoryRedirect tab="documents" />} />
               <Route path="/stock-documents/:id" element={<LegacyInventoryRedirect tab="documents" />} />
               <Route path="/stock-transactions" element={<LegacyInventoryRedirect tab="flows" />} />
@@ -274,7 +288,6 @@ function Shell({ user, onLogout }: { user: User; onLogout: () => void }) {
               <Route path="/warehouse-archive" element={<WarehouseArchivePage />} />
               <Route path="/system-settings" element={<Navigate to="/" replace />} />
             <Route path="/materials/raw" element={<MaterialListPage type="MATERIAL" user={user} />} />
-            <Route path="/materials/semi-finished" element={<Navigate to="/materials/raw" replace />} />
             <Route path="/materials/finished" element={<MaterialListPage type="FINISHED_GOOD" user={user} />} />
             <Route path="/materials/new" element={<MaterialFormPage user={user} />} />
             <Route path="/materials/:id/edit" element={<MaterialFormPage user={user} />} />
@@ -285,7 +298,8 @@ function Shell({ user, onLogout }: { user: User; onLogout: () => void }) {
             <Route path="/categories" element={<Navigate to="/material-categories" replace />} />
             <Route path="/units" element={<SimpleMasterPage kind="units" />} />
             <Route path="/warehouses" element={<WarehousesPage />} />
-            <Route path="/locations" element={<LocationsPage />} />
+            <Route path="/location-capacity" element={<PreserveQueryRedirect to="/inventory/warehouse-management" />} />
+            <Route path="/locations" element={<PreserveQueryRedirect to="/inventory/warehouse-management" />} />
             <Route path="/batches" element={<BatchesPage />} />
             <Route path="/boms" element={<BomsPage user={user} />} />
             <Route path="/inbound" element={<StockDocumentsV110Page type="MATERIAL_INBOUND" />} />
@@ -314,7 +328,10 @@ export default function App() {
   const [loading, setLoading] = useState(Boolean(localStorage.getItem('inventory_token')));
   useEffect(() => {
     if (!loading) return;
-    api('/auth/me').then(setUser).catch(() => localStorage.removeItem('inventory_token')).finally(() => setLoading(false));
+    api('/auth/me').then(setUser).catch((error: unknown) => {
+      // 导航或网络中断会取消正在进行的鉴权请求；只有服务端明确拒绝令牌时才清除会话。
+      if (error instanceof ApiError && [401, 403].includes(error.status)) localStorage.removeItem('inventory_token');
+    }).finally(() => setLoading(false));
   }, []);
   if (loading) return <div className="login-wrap"><Spin size="large" /></div>;
   if (!user) return <Login onLogin={setUser} />;

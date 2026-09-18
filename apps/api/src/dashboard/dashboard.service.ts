@@ -192,7 +192,7 @@ export class DashboardService {
             WHERE d.status='SUBMITTED' AND d.deleted_at IS NULL) "pendingApprovalCount"
           ,(SELECT count(*)::int
             FROM items ri
-            JOIN warehouses rw ON rw.warehouse_type=CASE WHEN ri.item_type IN ('MATERIAL','SEMI_FINISHED') THEN 'RAW' ELSE 'FG' END
+            JOIN warehouses rw ON rw.warehouse_type=CASE WHEN ri.item_type='MATERIAL' THEN 'RAW' ELSE 'FG' END
             LEFT JOIN (SELECT warehouse_id,item_id,sum(on_hand_qty) quantity FROM stock_balances GROUP BY warehouse_id,item_id) rb
               ON rb.warehouse_id=rw.id AND rb.item_id=ri.id
             WHERE ri.status='ACTIVE' AND ri.deleted_at IS NULL AND rw.status='ACTIVE' AND rw.deleted_at IS NULL
@@ -201,7 +201,7 @@ export class DashboardService {
               AND COALESCE(rb.quantity,0)>0 AND COALESCE(rb.quantity,0)<=ri.minimum_stock) "lowStockCount"
           ,(SELECT count(*)::int
             FROM items zi
-            JOIN warehouses zw ON zw.warehouse_type=CASE WHEN zi.item_type IN ('MATERIAL','SEMI_FINISHED') THEN 'RAW' ELSE 'FG' END
+            JOIN warehouses zw ON zw.warehouse_type=CASE WHEN zi.item_type='MATERIAL' THEN 'RAW' ELSE 'FG' END
             LEFT JOIN (SELECT warehouse_id,item_id,sum(on_hand_qty) quantity FROM stock_balances GROUP BY warehouse_id,item_id) zb
               ON zb.warehouse_id=zw.id AND zb.item_id=zi.id
             WHERE zi.status='ACTIVE' AND zi.deleted_at IS NULL AND zw.status='ACTIVE' AND zw.deleted_at IS NULL
@@ -246,7 +246,7 @@ export class DashboardService {
           COALESCE(b.quantity,0)::text "onHandQty",i.minimum_stock::text "minimumStock",
           CASE WHEN COALESCE(b.quantity,0)=0 THEN 'ZERO' ELSE 'LOW' END "riskLevel"
         FROM items i
-        JOIN warehouses w ON w.warehouse_type=CASE WHEN i.item_type IN ('MATERIAL','SEMI_FINISHED') THEN 'RAW' ELSE 'FG' END
+        JOIN warehouses w ON w.warehouse_type=CASE WHEN i.item_type='MATERIAL' THEN 'RAW' ELSE 'FG' END
         LEFT JOIN balances b ON b.warehouse_id=w.id AND b.item_id=i.id
         WHERE i.status='ACTIVE' AND i.deleted_at IS NULL AND w.status='ACTIVE' AND w.deleted_at IS NULL
           AND ($1::uuid IS NULL OR w.id=$1)
@@ -386,7 +386,7 @@ export class DashboardService {
           GREATEST(i.minimum_stock-GREATEST(COALESCE(b."currentQty",0)-COALESCE(b."frozenQty",0)-COALESCE(r.quantity,0),0),0)::text "shortageQty",
           COALESCE(df.quantity,0)::text "defectivePendingQty"
         FROM warehouses w
-        JOIN items i ON w.warehouse_type=CASE WHEN i.item_type IN ('MATERIAL','SEMI_FINISHED') THEN 'RAW' ELSE 'FG' END
+        JOIN items i ON w.warehouse_type=CASE WHEN i.item_type='MATERIAL' THEN 'RAW' ELSE 'FG' END
         LEFT JOIN balances b ON b.warehouse_id=w.id AND b.item_id=i.id
         LEFT JOIN reserved r ON r.warehouse_id=w.id AND r.item_id=i.id
         LEFT JOIN defective df ON df.item_id=i.id

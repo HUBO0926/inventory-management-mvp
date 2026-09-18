@@ -63,10 +63,40 @@ export class BomsService {
     return bom;
   }
 
+  async itemOptions(q: { role: 'output' | 'component'; keyword?: string; page?: string; pageSize?: string }) {
+    const itemType = q.role === 'output' ? 'FINISHED_GOOD' : q.role === 'component' ? 'MATERIAL' : null;
+    if (!itemType) throw new BusinessException('VALIDATION_ERROR', 'BOM 候选物料类型无效');
+
+    const page = parsePage(q.page, 1);
+    const pageSize = parsePage(q.pageSize, 100, 100);
+    const offset = (page - 1) * pageSize;
+    const params: any[] = [itemType];
+    const where = ["i.deleted_at IS NULL", "i.status='ACTIVE'", 'i.item_type=$1'];
+    const keyword = q.keyword?.trim();
+    if (keyword) {
+      params.push(`%${keyword}%`);
+      where.push(`(i.item_code ILIKE $${params.length} OR i.name ILIKE $${params.length})`);
+    }
+    const clause = `WHERE ${where.join(' AND ')}`;
+    const [{ count }] = await this.db.query(
+      `SELECT count(*)::int count FROM items i ${clause}`,
+      [...params],
+    );
+    params.push(pageSize, offset);
+    const items = await this.db.query(
+      `SELECT i.id,i.item_code "itemCode",i.name,i.item_type "itemType",i.model,i.spec,i.unit
+       FROM items i ${clause}
+       ORDER BY i.item_code
+       LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params,
+    );
+    return { items, total: count, page, pageSize };
+  }
+
   async save(id: string | null, dto: any, userId: string) {
     if (!dto.lines?.length) throw new BusinessException('VALIDATION_ERROR', 'BOM 至少包含一条组成物料');
     if (dto.lines.some((line: any) => line.materialId === dto.finishedGoodId)) {
-      throw new BusinessException('VALIDATION_ERROR', 'BOM 产出物料不能包含自身');
+      throw new BusinessException('VALIDATION_ERROR', 'BOM 产出成品不能包含自身');
     }
     if (new Set(dto.lines.map((line: any) => line.materialId)).size !== dto.lines.length) {
       throw new BusinessException('VALIDATION_ERROR', 'BOM 组成物料不能重复');
@@ -85,7 +115,7 @@ export class BomsService {
            AND status='ACTIVE' AND deleted_at IS NULL`,
         [dto.finishedGoodId],
       );
-      if (!output) throw new BusinessException('VALIDATION_ERROR', '产出物料必须是启用的半成品或成品');
+      if (!output) throw new BusinessException('VALIDATION_ERROR', '产出成品必须是启用的成品');
 
       const materialIds = dto.lines.map((line: any) => line.materialId);
       const materialRows = await qr.query(
@@ -95,9 +125,8 @@ export class BomsService {
         [materialIds],
       );
       if (materialRows.length !== dto.lines.length) {
-        throw new BusinessException('VALIDATION_ERROR', '组成物料只能选择启用的原材料或半成品');
+        throw new BusinessException('VALIDATION_ERROR', '组成物料必须是启用的原材料');
       }
-      await this.assertNoCycle(qr, dto.finishedGoodId, materialRows, id);
 
       let bomId = id;
       if (id) {
@@ -134,7 +163,7 @@ export class BomsService {
       if (error.code === '23505') {
         throw new BusinessException(
           'DUPLICATE_CODE',
-          '同一产出物料已有相同版本，或已有其他启用 BOM',
+          '同一产出成品已有相同版本，或已有其他启用 BOM',
           HttpStatus.CONFLICT,
         );
       }
@@ -177,31 +206,4 @@ export class BomsService {
     return { id, deletionMode: 'ARCHIVED' };
   }
 
-  private async assertNoCycle(
-    qr: QueryRunner,
-    outputId: string,
-    materials: Array<{ id: string; item_type: string }>,
-    currentBomId: string | null,
-  ) {
-    const semiFinishedIds = materials
-      .filter(row => row.item_type === 'SEMI_FINISHED')
-      .map(row => row.id);
-    if (!semiFinishedIds.length) return;
-    const [cycle] = await qr.query(
-      `WITH RECURSIVE graph(parent_id,child_id) AS (
-         SELECT b.finished_good_id,bi.material_id
-         FROM boms b JOIN bom_items bi ON bi.bom_id=b.id
-         JOIN items component ON component.id=bi.material_id
-         WHERE b.deleted_at IS NULL AND component.item_type='SEMI_FINISHED'
-           AND ($3::uuid IS NULL OR b.id<>$3)
-       ), reachable(node) AS (
-         SELECT unnest($2::uuid[])
-         UNION
-         SELECT g.child_id FROM reachable r JOIN graph g ON g.parent_id=r.node
-       )
-       SELECT 1 FROM reachable WHERE node=$1 LIMIT 1`,
-      [outputId, semiFinishedIds, currentBomId],
-    );
-    if (cycle) throw new BusinessException('BOM_CYCLE', '半成品 BOM 不能形成循环依赖', HttpStatus.CONFLICT);
-  }
 }

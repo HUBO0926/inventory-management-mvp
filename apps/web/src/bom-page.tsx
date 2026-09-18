@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Button,
   Col,
@@ -13,6 +13,7 @@ import {
   Row,
   Select,
   Space,
+  Spin,
 } from 'antd';
 import { DeleteOutlined, EditOutlined, EyeOutlined, PlusOutlined } from '@ant-design/icons';
 import type { User } from './App';
@@ -29,44 +30,120 @@ const itemTypeText: Record<string, string> = {
 const can = (user: User, permission: string) =>
   user.role === 'ADMIN' || Boolean(user.permissions?.includes(permission));
 
+export const BOM_OPTION_PAGE_SIZE = 100;
+
+type BomItemRole = 'output' | 'component';
+
+function optionLabel(item: any) {
+  return `${item.itemCode} ${item.name}（${itemTypeText[item.itemType]}）`;
+}
+
+function useBomItemOptions(role: BomItemRole) {
+  const [items, setItems] = useState<any[]>([]);
+  const [page, setPage] = useState(0);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const requestId = useRef(0);
+  const keyword = useRef('');
+
+  const load = useCallback(async (nextPage: number, nextKeyword: string, append: boolean) => {
+    const currentRequest = ++requestId.current;
+    setLoading(true);
+    try {
+      const params = new URLSearchParams({
+        role,
+        page: String(nextPage),
+        pageSize: String(BOM_OPTION_PAGE_SIZE),
+      });
+      if (nextKeyword) params.set('keyword', nextKeyword);
+      const result = await api(`/boms/item-options?${params}`);
+      if (currentRequest !== requestId.current) return;
+      setItems((current) => append
+        ? [...current, ...result.items.filter((item: any) => !current.some(option => option.id === item.id))]
+        : result.items);
+      setPage(result.page);
+      setTotal(result.total);
+    } catch (error: any) {
+      if (currentRequest === requestId.current) message.error(error.message);
+    } finally {
+      if (currentRequest === requestId.current) setLoading(false);
+    }
+  }, [role]);
+
+  useEffect(() => {
+    void load(1, '', false);
+    return () => { requestId.current += 1; };
+  }, [load]);
+
+  const search = useCallback((value: string) => {
+    keyword.current = value.trim();
+    void load(1, keyword.current, false);
+  }, [load]);
+
+  const loadMore = useCallback(() => {
+    if (loading || items.length >= total) return;
+    void load(page + 1, keyword.current, true);
+  }, [items.length, load, loading, page, total]);
+
+  const ensureSelected = useCallback((item?: any) => {
+    if (!item?.id || items.some(option => option.id === item.id)) return;
+    setItems(current => current.some(option => option.id === item.id) ? current : [item, ...current]);
+  }, [items]);
+
+  return { items, total, loading, search, loadMore, ensureSelected };
+}
+
+function pagedSelectProps(source: ReturnType<typeof useBomItemOptions>) {
+  return {
+    showSearch: true,
+    filterOption: false,
+    optionFilterProp: 'label',
+    options: source.items.map(item => ({ value: item.id, label: optionLabel(item) })),
+    loading: source.loading,
+    notFoundContent: source.loading ? <Spin size="small" /> : '暂无可选物料',
+    dropdownRender: (menu: React.ReactNode) => <>
+      {menu}
+      <div style={{ padding: '8px 12px', color: '#64748b', borderTop: '1px solid #f0f0f0' }}>
+        {source.loading ? '正在加载…' : `已加载 ${source.items.length} / 总计 ${source.total}`}
+      </div>
+    </>,
+    onSearch: source.search,
+    onPopupScroll: (event: React.UIEvent<HTMLElement>) => {
+      const target = event.currentTarget;
+      if (target.scrollTop + target.clientHeight >= target.scrollHeight - 24) source.loadMore();
+    },
+  };
+}
+
 export function BomsPage({ user }: { user: User }) {
   const [data, setData] = useState<any>({ items: [] });
-  const [items, setItems] = useState<any[]>([]);
   const [open, setOpen] = useState(false);
   const [editingId, setEditingId] = useState<string>();
   const [detail, setDetail] = useState<any>();
   const [saving, setSaving] = useState(false);
   const [form] = Form.useForm();
   const selectedOutput = Form.useWatch('finishedGoodId', form);
+  const outputItems = useBomItemOptions('output');
+  const componentItems = useBomItemOptions('component');
   const manageable = can(user, 'bom.manage');
   const deletable = can(user, 'bom.delete');
 
   const load = async () => {
     try {
-      const [boms, materialRows] = await Promise.all([
-        api('/boms?pageSize=100'),
-        api('/items?pageSize=100&status=ACTIVE'),
-      ]);
+      const boms = await api('/boms?pageSize=100');
       setData(boms);
-      setItems(materialRows.items);
     } catch (error: any) {
       message.error(error.message);
     }
   };
   useEffect(() => { void load(); }, []);
 
-  const outputOptions = useMemo(() => items
-    .filter(item => item.itemType === 'FINISHED_GOOD')
+  const componentOptions = useMemo(() => componentItems.items
+    .filter(item => item.id !== selectedOutput)
     .map(item => ({
       value: item.id,
-      label: `${item.itemCode} ${item.name}（${itemTypeText[item.itemType]}）`,
-    })), [items]);
-  const componentOptions = useMemo(() => items
-    .filter(item => item.itemType === 'MATERIAL' && item.id !== selectedOutput)
-    .map(item => ({
-      value: item.id,
-      label: `${item.itemCode} ${item.name}（${itemTypeText[item.itemType]}）`,
-    })), [items, selectedOutput]);
+      label: optionLabel(item),
+    })), [componentItems.items, selectedOutput]);
 
   const create = () => {
     setEditingId(undefined);
@@ -79,6 +156,8 @@ export function BomsPage({ user }: { user: User }) {
       const row = await api(`/boms/${record.id}`);
       setEditingId(record.id);
       form.setFieldsValue(row);
+      outputItems.ensureSelected({ id: row.finishedGoodId, itemCode: row.finishedGoodCode, name: row.finishedGoodName, itemType: row.outputItemType });
+      row.lines?.forEach((line: any) => componentItems.ensureSelected({ id: line.materialId, itemCode: line.itemCode, name: line.name, itemType: line.itemType }));
       setOpen(true);
     } catch (error: any) {
       message.error(error.message);
@@ -155,7 +234,7 @@ export function BomsPage({ user }: { user: User }) {
 
   const columns: any[] = [
     {
-      title: '产出物料',
+      title: '产出成品',
       render: (_: unknown, record: any) => (
         <span>{record.finishedGoodCode} {record.finishedGoodName}<small className="table-subtext">{itemTypeText[record.outputItemType]}</small></span>
       ),
@@ -186,7 +265,7 @@ export function BomsPage({ user }: { user: User }) {
   return (
     <PageScaffold
       title="BOM 档案"
-      subtitle="产出物料可选择半成品或成品，组成物料可选择原材料或半成品。"
+      subtitle="产出成品可选择启用成品，组成物料可选择启用原材料。"
       extra={manageable ? <Button type="primary" icon={<PlusOutlined />} onClick={create}>新增 BOM</Button> : undefined}
     >
       <Table rowKey="id" dataSource={data.items} columns={columns} pagination={false} scroll={{ x: 1100 }} />
@@ -200,8 +279,8 @@ export function BomsPage({ user }: { user: User }) {
         destroyOnHidden
       >
         <Form form={form} layout="vertical" onFinish={save}>
-          <Form.Item label="产出物料" name="finishedGoodId" rules={[{ required: true, message: '请选择产出物料' }]}>
-            <Select showSearch optionFilterProp="label" options={outputOptions} />
+          <Form.Item label="产出成品" name="finishedGoodId" rules={[{ required: true, message: '请选择产出成品' }]}>
+            <Select {...pagedSelectProps(outputItems)} />
           </Form.Item>
           <Row gutter={12}>
             <Col xs={24} sm={12}><Form.Item label="版本" name="version" rules={[{ required: true }]}><Input maxLength={30} /></Form.Item></Col>
@@ -212,7 +291,10 @@ export function BomsPage({ user }: { user: User }) {
               {fields.map(field => (
                 <Row gutter={8} key={field.key} align="middle">
                   <Col xs={24} sm={16}><Form.Item {...field} label="组成物料" name={[field.name, 'materialId']} rules={[{ required: true }]}>
-                    <Select showSearch optionFilterProp="label" options={componentOptions} />
+                    <Select
+                      {...pagedSelectProps(componentItems)}
+                      options={componentOptions}
+                    />
                   </Form.Item></Col>
                   <Col xs={20} sm={6}><Form.Item {...field} label="单件用量" name={[field.name, 'qtyPer']} rules={[{ required: true }]}>
                     <InputNumber min={1} precision={0} stringMode style={{ width: '100%' }} />
@@ -229,7 +311,7 @@ export function BomsPage({ user }: { user: User }) {
       <Drawer title="BOM 详情" width={680} open={Boolean(detail)} onClose={() => setDetail(undefined)}>
         {detail && <>
           <Descriptions bordered column={1} items={[
-            { label: '产出物料', children: `${detail.finishedGoodCode} ${detail.finishedGoodName}` },
+            { label: '产出成品', children: `${detail.finishedGoodCode} ${detail.finishedGoodName}` },
             { label: '物料类型', children: itemTypeText[detail.outputItemType] },
             { label: '版本', children: detail.version },
             { label: '状态', children: <StatusTag value={detail.status} /> },

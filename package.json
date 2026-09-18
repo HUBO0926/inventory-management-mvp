@@ -1,6 +1,6 @@
 {
   "name": "inventory-management-mvp",
-  "version": "1.3.1",
+  "version": "1.7.0",
   "private": true,
   "packageManager": "pnpm@11.9.0",
   "scripts": {
@@ -10,6 +10,7 @@
     "lint": "pnpm -r lint",
     "db:migrate": "pnpm --filter @inventory/api migration:run",
     "db:seed": "pnpm --filter @inventory/api seed",
+    "db:seed:demo-inventory": "pnpm --filter @inventory/api seed:demo-inventory",
     "test:e2e": "pnpm --filter @inventory/api test:e2e",
     "test:upgrade": "pnpm --filter @inventory/api test:upgrade",
     "test:playwright": "pnpm --filter @inventory/web test:playwright"

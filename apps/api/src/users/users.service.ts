@@ -32,9 +32,9 @@ export class UsersService {
     params.push(pageSize, offset);
     const rows = await this.db.query(
       `SELECT u.id,u.username,u.name,u.employee_name "employeeName",u.employee_no "employeeNo",
-        u.department,u.position,u.phone,u.email,r.code role,r.id "roleId",r.name "roleName",
+        u.department,u.department_name "departmentName",u.position,u.position_type "positionType",u.manager_user_id "managerUserId",m.name "managerName",u.can_approve "canApprove",u.phone,u.email,r.code role,r.id "roleId",r.name "roleName",
         u.status,u.last_login_at "lastLoginAt",u.remarks,u.created_at "createdAt"
-       FROM users u JOIN roles r ON r.id=u.role_id
+       FROM users u JOIN roles r ON r.id=u.role_id LEFT JOIN users m ON m.id=u.manager_user_id
        ${clause} ORDER BY u.username LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params,
     );
@@ -50,19 +50,21 @@ export class UsersService {
       if (!employeeName) {
         throw new BusinessException('VALIDATION_ERROR', '人员姓名不能为空');
       }
+      await this.validateOrganization(dto, undefined, operator);
       const hash = await bcrypt.hash(dto.password, 12);
       const [role] = await this.db.query(
         `SELECT id,code FROM roles WHERE id=$1 AND status='ACTIVE'`, [dto.roleId],
       );
       if (!role) throw new BusinessException('VALIDATION_ERROR', '角色不存在或已停用');
       const [row] = await this.db.query(
-        `INSERT INTO users(username,name,password_hash,role,role_id,employee_name,employee_no,department,position,phone,email,remarks)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-         RETURNING id,username,name,role,role_id "roleId",status,employee_name "employeeName"`,
+        `INSERT INTO users(username,name,password_hash,role,role_id,employee_name,employee_no,department,position,phone,email,remarks,position_type,manager_user_id,department_name,can_approve)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+         RETURNING id,username,name,role,role_id "roleId",status,employee_name "employeeName",position_type "positionType",manager_user_id "managerUserId",department_name "departmentName",can_approve "canApprove"`,
         [dto.username.trim(), employeeName, hash, role.code, role.id,
           employeeName, dto.employeeNo?.trim() || null, dto.department?.trim() || null,
           dto.position?.trim() || null, dto.phone?.trim() || null, dto.email?.trim() || null,
-          dto.remarks?.trim() || null],
+          dto.remarks?.trim() || null, dto.positionType || null, dto.managerUserId || null,
+          dto.departmentName?.trim() || dto.department?.trim() || null, Boolean(dto.canApprove)],
       );
       await this.audit.log(userId, 'CREATE_USER', 'users', row.id, dto);
       return row;
@@ -73,6 +75,14 @@ export class UsersService {
   }
 
   async update(id: string, dto: any, userId: string) {
+    const [operator] = await this.db.query(`SELECT id,role FROM users WHERE id=$1`, [userId]);
+    await this.validateOrganization(dto, id, operator);
+    let roleCode: string | undefined;
+    if (dto.roleId !== undefined) {
+      const [role] = await this.db.query(`SELECT code FROM roles WHERE id=$1 AND status='ACTIVE'`, [dto.roleId]);
+      if (!role) throw new BusinessException('VALIDATION_ERROR', '角色不存在或已停用');
+      roleCode = role.code;
+    }
     const fields: string[] = [];
     const params: any[] = [];
     const map: Record<string, string> = {
@@ -80,12 +90,18 @@ export class UsersService {
       department: 'department', position: 'position',
       phone: 'phone', email: 'email', remarks: 'remarks', status: 'status',
       roleId: 'role_id',
+      positionType: 'position_type', managerUserId: 'manager_user_id',
+      departmentName: 'department_name', canApprove: 'can_approve',
     };
     for (const [key, col] of Object.entries(map)) {
       if (dto[key] !== undefined) {
         params.push(dto[key]);
         fields.push(`${col}=$${params.length}`);
       }
+    }
+    if (roleCode) {
+      params.push(roleCode);
+      fields.push(`role=$${params.length}`);
     }
     // If name field provided, also update employee_name (backward compat)
     if (dto.name !== undefined) {
@@ -170,5 +186,70 @@ export class UsersService {
     );
     if (!row) throw new BusinessException('NOT_FOUND', '账号不存在');
     return row;
+  }
+
+  async get(id: string) {
+    const [row] = await this.db.query(`SELECT u.id,u.username,u.name,u.employee_name "employeeName",u.department,u.department_name "departmentName",
+      u.position,u.position_type "positionType",u.manager_user_id "managerUserId",m.name "managerName",u.can_approve "canApprove",u.status,
+      r.code role,r.name "roleName" FROM users u JOIN roles r ON r.id=u.role_id LEFT JOIN users m ON m.id=u.manager_user_id
+      WHERE u.id=$1 AND u.deleted_at IS NULL`, [id]);
+    if (!row) throw new BusinessException('NOT_FOUND', '账号不存在');
+    row.warehouses = await this.warehouses(id);
+    return row;
+  }
+
+  async approvalManager(id: string) {
+    const [row] = await this.db.query(`SELECT m.id,m.username,m.name "employeeName",m.position_type "positionType",m.department_name "departmentName",m.can_approve "canApprove"
+      FROM users u LEFT JOIN users m ON m.id=u.manager_user_id AND m.status='ACTIVE' AND m.deleted_at IS NULL
+      WHERE u.id=$1 AND u.deleted_at IS NULL`, [id]);
+    if (!row) throw new BusinessException('NOT_FOUND', '账号不存在');
+    if (!row.id || !row.canApprove) throw new BusinessException('APPROVAL_MANAGER_MISSING', '当前账号尚未配置有效的上级审批人员');
+    return row;
+  }
+
+  async warehouses(id: string) {
+    return this.db.query(`SELECT w.id,w.warehouse_code "warehouseCode",w.display_name "displayName",wm.created_at "boundAt",u.name "boundByName"
+      FROM warehouse_manager wm JOIN warehouses w ON w.id=wm.warehouse_id LEFT JOIN users u ON u.id=wm.created_by
+      WHERE wm.user_id=$1 AND w.deleted_at IS NULL ORDER BY w.warehouse_code`, [id]);
+  }
+
+  async setWarehouses(userId: string, warehouseIds: string[], operatorId: string) {
+    const unique = [...new Set(warehouseIds)];
+    const qr = this.db.createQueryRunner(); await qr.connect(); await qr.startTransaction();
+    try {
+      const [manager] = await qr.query(`SELECT id FROM users WHERE id=$1 AND status='ACTIVE' AND deleted_at IS NULL AND position_type='WAREHOUSE_MANAGER'`, [userId]);
+      if (!manager) throw new BusinessException('VALIDATION_ERROR', '只能为启用的仓库管理员绑定仓库');
+      const [{ count }] = await qr.query(`SELECT count(*)::int count FROM warehouses WHERE id=ANY($1::uuid[]) AND deleted_at IS NULL`, [unique]);
+      if (Number(count) !== unique.length) throw new BusinessException('VALIDATION_ERROR', '包含不存在的仓库');
+      await qr.query(`DELETE FROM warehouse_manager WHERE user_id=$1`, [userId]);
+      if (unique.length) await qr.query(`INSERT INTO warehouse_manager(warehouse_id,user_id,created_by) SELECT unnest($1::uuid[]),$2,$3`, [unique, userId, operatorId]);
+      await qr.commitTransaction();
+      await this.audit.log(operatorId, 'UPDATE_WAREHOUSE_MANAGERS', 'users', userId, { warehouseIds: unique });
+      return this.warehouses(userId);
+    } catch (e) { await qr.rollbackTransaction(); throw e; } finally { await qr.release(); }
+  }
+
+  private async validateOrganization(dto: any, targetId: string | undefined, operator: any) {
+    let current: any;
+    if (targetId) [current] = await this.db.query(`SELECT manager_user_id,position_type FROM users WHERE id=$1 AND deleted_at IS NULL`, [targetId]);
+    const managerId = dto.managerUserId === undefined ? current?.manager_user_id : dto.managerUserId;
+    const positionType = dto.positionType === undefined ? current?.position_type : dto.positionType;
+    if (managerId === undefined && positionType === undefined) return;
+    if (managerId && targetId && managerId === targetId) throw new BusinessException('VALIDATION_ERROR', '不能绑定自己为上级');
+    if (managerId) {
+      const [manager] = await this.db.query(`SELECT id FROM users WHERE id=$1 AND status='ACTIVE' AND deleted_at IS NULL AND can_approve=true AND position_type IN ('MANAGER','SYSTEM_ADMIN')`, [managerId]);
+      if (!manager) throw new BusinessException('VALIDATION_ERROR', '上级必须是启用且具备审批权限的人员');
+      let cursor = managerId;
+      for (let i = 0; i < 30; i++) {
+        const [next] = await this.db.query(`SELECT manager_user_id FROM users WHERE id=$1`, [cursor]);
+        if (!next?.manager_user_id) break;
+        if (next.manager_user_id === targetId) throw new BusinessException('VALIDATION_ERROR', '上级关系不能形成循环');
+        cursor = next.manager_user_id;
+      }
+    }
+    if (['PRODUCTION','WAREHOUSE_MANAGER'].includes(positionType) && !managerId) throw new BusinessException('VALIDATION_ERROR', '生产人员和仓库管理员必须绑定上级审批人');
+    if (targetId && operator?.role !== 'ADMIN' && (managerId !== undefined || dto.positionType !== undefined)) {
+      throw new BusinessException('FORBIDDEN', '只有系统管理员可以维护人员组织关系');
+    }
   }
 }

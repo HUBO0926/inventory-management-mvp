@@ -26,6 +26,7 @@ export function ApprovalsPage({user}:{user:User}) {
   const [filters,setFilters]=useState<any>({});
   const [rejecting,setRejecting]=useState<'batch'|'single'>();
   const [allocationOpen,setAllocationOpen]=useState(false);
+  const [capacityByKey,setCapacityByKey]=useState<Record<string,any>>({});
   const [processing,setProcessing]=useState<any>();
   const [rejectForm]=Form.useForm();
   const [allocationForm]=Form.useForm();
@@ -59,10 +60,18 @@ export function ApprovalsPage({user}:{user:User}) {
       message.success('审核通过，库存已过账');setDrawer(false);setAllocationOpen(false);void load();
     }catch(error:any){message.error(error.message);}
   };
-  const approve=()=>{
+  const approve=async()=>{
     if(!detail)return;
     if(receiptTypes.includes(detail.documentType)){
       const options=detail.allocationOptions||[];
+      const requests=new Map<string,{warehouseId:string;itemId:string;purpose:string}>();
+      for(const line of detail.lines||[]){
+        const normalType=line.itemType==='MATERIAL'?'RAW':'FG';
+        for(const warehouse of options.filter((row:any)=>row.warehouseType===normalType)){
+          requests.set(`${warehouse.warehouseId}:${line.itemId}:INBOUND`,{warehouseId:warehouse.warehouseId,itemId:line.itemId,purpose:'INBOUND'});
+        }
+      }
+      try{const inventories=await Promise.all([...requests.entries()].map(async([key,params])=>[key,await api(`/stock-documents/item-location-inventory?${new URLSearchParams(params)}`)] as const));setCapacityByKey(current=>({...current,...Object.fromEntries(inventories)}));}catch(error:any){message.error(error?.message||'库位容量加载失败');return;}
       allocationForm.setFieldsValue({allocations:(detail.lines||[]).map((line:any)=>{
         const normalType=line.itemType==='MATERIAL'?'RAW':'FG';
         const normalTargets=options.filter((row:any)=>row.warehouseType===normalType);
@@ -126,7 +135,11 @@ export function ApprovalsPage({user}:{user:User}) {
   const statistics:[string,string,string][]=[['待我审核','pendingMine',''],['范围内待审','pendingAll',''],['今日已审核','approvedToday','green'],['今日已驳回','rejectedToday','red'],['超时待审核','overdue','orange'],['本月已审核','approvedMonth','green']];
   const allocationOptions=detail?.allocationOptions||data.allocationOptions||[];
   const warehouseOptions=(type:string)=>Array.from(new Map(allocationOptions.filter((row:any)=>row.warehouseType===type).map((row:any)=>[row.warehouseId,{value:row.warehouseId,label:`${row.warehouseCode} ${row.warehouseName}`}])).values());
-  const locationOptions=(warehouseId:string)=>allocationOptions.filter((row:any)=>row.warehouseId===warehouseId).map((row:any)=>({value:row.locationId,label:`${row.zoneCode} / ${row.locationCode} ${row.locationName||''}`}));
+  const locationOptions=(warehouseId:string,itemId:string)=>{
+    const inventory=capacityByKey[`${warehouseId}:${itemId}:INBOUND`];
+    if(inventory)return (inventory.locations||[]).map((row:any)=>({value:row.locationId,disabled:row.isFull,label:`${row.zoneCode} / ${row.locationCode}｜现存 ${formatQuantity(row.onHandQty)}｜${row.capacityQty===null?'不限量':`剩余 ${formatQuantity(row.availableCapacityQty)}`}`}));
+    return allocationOptions.filter((row:any)=>row.warehouseId===warehouseId).map((row:any)=>({value:row.locationId,label:`${row.zoneCode} / ${row.locationCode} ${row.locationName||''}`}));
+  };
 
   return <div className="approvals-page">
     <div className="page-heading"><div><Typography.Title level={2}>审核中心</Typography.Title><Typography.Text type="secondary">所有库存审核与不良品处置统一在此处理。</Typography.Text></div><Button icon={<ReloadOutlined/>} onClick={load}>刷新</Button></div>
@@ -139,7 +152,7 @@ export function ApprovalsPage({user}:{user:User}) {
     </Card>
 
     <Drawer title={`审核详情 - ${safe(detail?.documentNo,'未生成单号')}`} width={mobile?'100%':900} open={drawer} onClose={()=>setDrawer(false)} footer={<Space style={{display:'flex',justifyContent:'flex-end'}}><Button onClick={()=>setDrawer(false)}>关闭</Button>{detail?.status==='SUBMITTED'&&canReject&&<Button danger onClick={()=>setRejecting('single')}>驳回</Button>}{detail?.status==='SUBMITTED'&&canApprove&&<Button type="primary" icon={<CheckOutlined/>} onClick={approve}>审核通过</Button>}</Space>}>
-      {detail&&<><Descriptions column={mobile?1:2} bordered size="small" items={[{label:'业务类型',children:docName(detail.documentType)},{label:'状态',children:statusText[detail.status]||detail.status},{label:'送审意向仓库',children:`${safe(detail.warehouseCode)} ${safe(detail.warehouseName,'')}`},{label:'提交时间',children:formatBeijingTime(detail.submittedAt)},{label:'来源业务',children:safe(detail.sourceDocumentNo)},{label:'备注',children:safe(detail.notes)}]}/><Table size="small" rowKey="id" pagination={false} dataSource={detail.lines||[]} columns={[{title:'物料',render:(_:any,row:any)=>`${row.itemCode} ${row.itemName}`},{title:'原库位',dataIndex:'locationCode'},{title:'批次',dataIndex:'batchNo',render:safe},{title:'数量',render:(_:any,row:any)=>`${formatQuantity(row.quantity)} ${row.unit}`}]} style={{marginTop:16}}/>{detail.receiptAllocations?.length>0&&<Table size="small" rowKey={(row:any)=>`${row.documentLineId}-${row.disposition}-${row.locationId}`} pagination={false} dataSource={detail.receiptAllocations} columns={[{title:'分配',dataIndex:'disposition',render:(value:string)=>value==='NORMAL'?'正常品':'不良品'},{title:'仓库',dataIndex:'warehouseCode'},{title:'库位',dataIndex:'locationCode'},{title:'数量',dataIndex:'quantity',render:formatQuantity},{title:'不良原因',dataIndex:'defectReason',render:safe}]} style={{marginTop:16}}/>}</>}
+      {detail&&<><Descriptions column={mobile?1:2} bordered size="small" items={[{label:'业务类型',children:docName(detail.documentType)},{label:'状态',children:statusText[detail.status]||detail.status},{label:'送审意向仓库',children:`${safe(detail.warehouseCode)} ${safe(detail.warehouseName,'')}`},{label:'提交时间',children:formatBeijingTime(detail.submittedAt)},{label:'来源业务',children:safe(detail.sourceDocumentNo)},{label:'备注',children:safe(detail.notes)}]}/><Table size="small" rowKey="id" pagination={false} dataSource={detail.documentType==='STOCK_CHECK'?(detail.stockCheckLines||[]):(detail.lines||[])} columns={detail.documentType==='STOCK_CHECK'?[{title:'物料',render:(_:any,row:any)=>`${row.itemCode} ${row.itemName}`},{title:'库位',dataIndex:'locationCode'},{title:'批次',dataIndex:'batchNo',render:safe},{title:'账面数',dataIndex:'systemQtySnapshot',render:formatQuantity},{title:'实盘数',dataIndex:'countedQty',render:formatQuantity},{title:'差异',dataIndex:'differenceQty',render:formatQuantity}]:[{title:'物料',render:(_:any,row:any)=>`${row.itemCode} ${row.itemName}`},{title:'原库位',dataIndex:'locationCode'},{title:'批次',dataIndex:'batchNo',render:safe},{title:'数量',render:(_:any,row:any)=>`${formatQuantity(row.quantity)} ${row.unit}`}]} style={{marginTop:16}}/>{detail.receiptAllocations?.length>0&&<Table size="small" rowKey={(row:any)=>`${row.documentLineId}-${row.disposition}-${row.locationId}`} pagination={false} dataSource={detail.receiptAllocations} columns={[{title:'分配',dataIndex:'disposition',render:(value:string)=>value==='NORMAL'?'正常品':'不良品'},{title:'仓库',dataIndex:'warehouseCode'},{title:'库位',dataIndex:'locationCode'},{title:'数量',dataIndex:'quantity',render:formatQuantity},{title:'不良原因',dataIndex:'defectReason',render:safe}]} style={{marginTop:16}}/>}</>}
     </Drawer>
 
     <Modal width={850} title="入库审核分配" open={allocationOpen} onCancel={()=>setAllocationOpen(false)} onOk={()=>allocationForm.submit()} okText="审核通过并过账">
@@ -152,10 +165,10 @@ export function ApprovalsPage({user}:{user:User}) {
           <Row gutter={12} style={{marginTop:8}}>
             <Col xs={24} md={8}><Form.Item label="正常数量" name={[field.name,'normalQty']} rules={[{required:true}]}><InputNumber min={0} precision={0} style={{width:'100%'}}/></Form.Item></Col>
             <Col xs={24} md={8}><Form.Item label="正常仓库" name={[field.name,'normalWarehouseId']}><Select options={warehouseOptions(normalType)} onChange={()=>allocationForm.setFieldValue(['allocations',field.name,'normalLocationId'],undefined)}/></Form.Item></Col>
-            <Col xs={24} md={8}><Form.Item noStyle shouldUpdate>{({getFieldValue})=><Form.Item label="正常库位" name={[field.name,'normalLocationId']}><Select options={locationOptions(getFieldValue(['allocations',field.name,'normalWarehouseId']))}/></Form.Item>}</Form.Item></Col>
+            <Col xs={24} md={8}><Form.Item noStyle shouldUpdate>{({getFieldValue})=><Form.Item label="正常库位" name={[field.name,'normalLocationId']}><Select options={locationOptions(getFieldValue(['allocations',field.name,'normalWarehouseId']),line.itemId)}/></Form.Item>}</Form.Item></Col>
             <Col xs={24} md={8}><Form.Item label="不良数量" name={[field.name,'defectiveQty']} rules={[{required:true}]}><InputNumber min={0} precision={0} style={{width:'100%'}}/></Form.Item></Col>
             <Col xs={24} md={8}><Form.Item label="不良品仓库" name={[field.name,'defectiveWarehouseId']}><Select allowClear options={warehouseOptions('DEFECTIVE')} onChange={()=>allocationForm.setFieldValue(['allocations',field.name,'defectiveLocationId'],undefined)}/></Form.Item></Col>
-            <Col xs={24} md={8}><Form.Item noStyle shouldUpdate>{({getFieldValue})=><Form.Item label="不良品库位" name={[field.name,'defectiveLocationId']}><Select allowClear options={locationOptions(getFieldValue(['allocations',field.name,'defectiveWarehouseId']))}/></Form.Item>}</Form.Item></Col>
+            <Col xs={24} md={8}><Form.Item noStyle shouldUpdate>{({getFieldValue})=><Form.Item label="不良品库位" name={[field.name,'defectiveLocationId']}><Select allowClear options={locationOptions(getFieldValue(['allocations',field.name,'defectiveWarehouseId']),line.itemId)}/></Form.Item>}</Form.Item></Col>
             <Col span={24}><Form.Item label="不良原因" name={[field.name,'defectReason']}><Input.TextArea maxLength={500} rows={2}/></Form.Item></Col>
           </Row>
         </Card>;
@@ -167,7 +180,7 @@ export function ApprovalsPage({user}:{user:User}) {
         <Descriptions size="small" column={1} items={[{label:'物料',children:`${processing.itemCode} ${processing.itemName}`},{label:'可处理数量',children:`${formatQuantity(processing.remainingQty)} ${processing.unit}`},{label:'不良原因',children:processing.defectReason}]}/>
         <Form.Item label="处理方式" name="action" rules={[{required:true}]}><Select options={processing.itemType==='MATERIAL'?[{value:'RETURN',label:'退货'},{value:'REPAIR_RESTOCK',label:'维修重新入库'}]:[{value:'RETURN_PRODUCTION',label:'退回生产任务'}]}/></Form.Item>
         <Form.Item label="处理数量" name="quantity" rules={[{required:true}]}><InputNumber min={1} max={Number(processing.remainingQty)} precision={0} style={{width:'100%'}}/></Form.Item>
-        <Form.Item noStyle shouldUpdate>{({getFieldValue})=>getFieldValue('action')==='REPAIR_RESTOCK'?<><Form.Item label="目标原材料仓库" name="targetWarehouseId" rules={[{required:true}]}><Select options={warehouseOptions('RAW')} onChange={()=>processForm.setFieldValue('targetLocationId',undefined)}/></Form.Item><Form.Item label="目标库位" name="targetLocationId" rules={[{required:true}]}><Select options={locationOptions(getFieldValue('targetWarehouseId'))}/></Form.Item></>:null}</Form.Item>
+        <Form.Item noStyle shouldUpdate>{({getFieldValue})=>getFieldValue('action')==='REPAIR_RESTOCK'?<><Form.Item label="目标原材料仓库" name="targetWarehouseId" rules={[{required:true}]}><Select options={warehouseOptions('RAW')} onChange={()=>processForm.setFieldValue('targetLocationId',undefined)}/></Form.Item><Form.Item label="目标库位" name="targetLocationId" rules={[{required:true}]}><Select options={locationOptions(getFieldValue('targetWarehouseId'),processing.itemId)}/></Form.Item></>:null}</Form.Item>
         {processing.itemType==='FINISHED_GOOD'&&<Form.Item label="生产任务" name="productionOrderId" rules={[{required:true}]}><Select disabled={Boolean(processing.productionOrderId)} options={(data.productionOrders||[]).filter((row:any)=>row.itemId===processing.itemId&&Number(row.availableCompletionQty)>=Number(processForm.getFieldValue('quantity')||1)).map((row:any)=>({value:row.id,label:`${row.orderNo}（待完工 ${formatQuantity(row.availableCompletionQty)}）`}))}/></Form.Item>}
         <Form.Item label={processing.itemType==='MATERIAL'?'处理原因 / 维修说明':'处理意见'} name="reason" rules={[{required:true},{max:500}]}><Input.TextArea rows={4} maxLength={500}/></Form.Item>
       </Form>}

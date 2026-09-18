@@ -8,7 +8,7 @@ export class WorkbenchService {
   async overview() {
     const [kpi] = await this.db.query(`
       SELECT
-        count(*) FILTER (WHERE i.item_type IN ('MATERIAL','SEMI_FINISHED'))::int AS "rawSkuCount",
+        count(*) FILTER (WHERE i.item_type='MATERIAL')::int AS "rawSkuCount",
         count(*) FILTER (WHERE i.item_type='FINISHED_GOOD')::int AS "fgSkuCount",
         coalesce(sum(sb.on_hand_qty),0)::text AS "totalStock",
         count(*) FILTER (WHERE coalesce(sb.on_hand_qty,0)=0)::int AS "zeroStockCount",

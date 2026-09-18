@@ -26,7 +26,7 @@ export class AuditRequestInterceptor implements NestInterceptor {
           ip || null,
           result,
           result === 'FAILED' ? (errorBody.code || `HTTP_${error?.getStatus?.() || 500}`) : null,
-          process.env.APP_VERSION || '1.3.1',
+          process.env.APP_VERSION || '1.7.0',
         ],
       ).catch(() => undefined);
     };

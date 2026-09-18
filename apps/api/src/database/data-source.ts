@@ -16,6 +16,15 @@ import { ApprovalHistoryDocumentRetention1830000000000 } from './migrations/1830
 import { ProductionPicking1840000000000 } from './migrations/1840000000000-ProductionPicking';
 import { InventoryManagement1850000000000 } from './migrations/1850000000000-InventoryManagement';
 import { IntegerQuantityDefectiveProcessing1860000000000 } from './migrations/1860000000000-IntegerQuantityDefectiveProcessing';
+import { OrganizationApprovalBinding1870000000000 } from './migrations/1870000000000-OrganizationApprovalBinding';
+import { ApprovalStateIntegrity1880000000000 } from './migrations/1880000000000-ApprovalStateIntegrity';
+import { ProductionBomManagement1890000000000 } from './migrations/1890000000000-ProductionBomManagement';
+import { LocationItemCapacities1900000000000 } from './migrations/1900000000000-LocationItemCapacities';
+import { RemoveSemiFinished1910000000000 } from './migrations/1910000000000-RemoveSemiFinished';
+import { CapacityReservationsAndNotes1920000000000 } from './migrations/1920000000000-CapacityReservationsAndNotes';
+import { WarehouseWorkspacePermissions1930000000000 } from './migrations/1930000000000-WarehouseWorkspacePermissions';
+import { WarehouseManagementWorkbench1940000000000 } from './migrations/1940000000000-WarehouseManagementWorkbench';
+import { FunctionalWarehouseTestRuns1950000000000 } from './migrations/1950000000000-FunctionalWarehouseTestRuns';
 
 export const createDataSource = () => {
   const connection = process.env.DATABASE_URL
@@ -48,6 +57,15 @@ export const createDataSource = () => {
       ProductionPicking1840000000000,
       InventoryManagement1850000000000,
       IntegerQuantityDefectiveProcessing1860000000000,
+      OrganizationApprovalBinding1870000000000,
+      ApprovalStateIntegrity1880000000000,
+      ProductionBomManagement1890000000000,
+      LocationItemCapacities1900000000000,
+      RemoveSemiFinished1910000000000,
+      CapacityReservationsAndNotes1920000000000,
+      WarehouseWorkspacePermissions1930000000000,
+    WarehouseManagementWorkbench1940000000000,
+    FunctionalWarehouseTestRuns1950000000000,
     ],
     extra: { options: '-c timezone=Asia/Shanghai' },
     logging: process.env.DB_LOGGING === 'true',

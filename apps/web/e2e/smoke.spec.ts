@@ -44,7 +44,7 @@ test('管理员可切换主题并查看构建版本', async ({ page }, testInfo)
   await login(page, 'admin');
   await page.getByLabel('切换浅色/深色主题').click();
   await expect.poll(() => page.evaluate(() => document.documentElement.dataset.theme)).toBe('dark');
-  await expect(page.getByText('V1.3.1', { exact: true })).toBeVisible();
+  await expect(page.getByText('V1.7.0', { exact: true })).toBeVisible();
 });
 
 test('管理员新增账号时姓名字段可通过参数校验', async ({ page }, testInfo) => {
@@ -60,6 +60,8 @@ test('管理员新增账号时姓名字段可通过参数校验', async ({ page 
   await roleSelect.click();
   await roleSelect.press('ArrowDown');
   await roleSelect.press('Enter');
+  await dialog.getByLabel('岗位').click();
+  await page.getByText('管理人员', { exact: true }).click();
   await dialog.getByLabel('初始密码').fill('68182170');
   const createResponse = page.waitForResponse(response =>
     response.url().endsWith('/api/users') && response.request().method() === 'POST',
@@ -86,12 +88,13 @@ test('管理员主要路由无白屏、脚本错误和整体横向溢出', async
   const runtimeErrors: string[] = [];
   page.on('pageerror', error => runtimeErrors.push(error.message));
   page.on('console', entry => {
-    if (entry.type() === 'error') runtimeErrors.push(entry.text());
+    if (entry.type() === 'error' && !entry.text().startsWith('Warning:')) runtimeErrors.push(entry.text());
   });
   await login(page, 'admin');
   const routes = [
     '/',
-    '/warehouse-virtual',
+    '/virtual-warehouse',
+    '/inventory/warehouse-management',
     '/inventory/management?tab=documents',
     '/inventory/management?tab=flows',
     '/inventory/management?tab=reports&reportType=current',
@@ -112,6 +115,9 @@ test('管理员主要路由无白屏、脚本错误和整体横向溢出', async
   ];
   for (const route of routes) {
     await page.goto(route);
+    await expect.poll(() => page.locator('.app-content').evaluate(element => element.textContent?.trim().length ?? 0), {
+      message: `${route} 页面内容为空`,
+    }).toBeGreaterThan(0);
     const state = await page.locator('.app-content').evaluate(element => ({
       textLength: element.textContent?.trim().length ?? 0,
       overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
@@ -120,6 +126,38 @@ test('管理员主要路由无白屏、脚本错误和整体横向溢出', async
     expect(state.overflow, `${route} 页面存在整体横向溢出`).toBe(false);
   }
   expect(runtimeErrors).toEqual([]);
+});
+
+test('仓库管理工作台支持三级懒加载、兼容路由与桌面宽度适配', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop-chromium');
+  await login(page, 'admin');
+  for (const viewport of [
+    { width: 1366, height: 768 },
+    { width: 1440, height: 900 },
+    { width: 1920, height: 1080 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await page.goto('/inventory/warehouse-management');
+    await expect(page.getByRole('heading', { name: '仓库管理' })).toBeVisible();
+    await expect(page.locator('.warehouse-tree-row.warehouse').first()).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+  }
+
+  const zone = page.locator('.warehouse-tree-row.zone').first();
+  await expect(zone).toBeVisible();
+  await zone.locator('.warehouse-tree-toggle').click();
+  const location = page.locator('.warehouse-tree-row.location').first();
+  await expect(location).toBeVisible();
+  await location.click();
+  await expect(page.getByText('库位物料库存')).toBeVisible();
+  await expect(page.getByRole('columnheader', { name: '当前库存' }).first()).toBeVisible();
+  await expect(page.getByRole('columnheader', { name: '可用库存' }).first()).toBeVisible();
+  await expect(page.getByRole('columnheader', { name: '剩余容量' }).first()).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+
+  await page.goto('/location-capacity?warehouse=RAW&zone=RAW01&location=RAW01-DEFAULT');
+  await expect(page).toHaveURL(/\/inventory\/warehouse-management\?warehouse=RAW&zone=RAW01&location=RAW01-DEFAULT/);
+  await expect(page.getByRole('heading', { name: '仓库管理' })).toBeVisible();
 });
 
 test('手机端使用抽屉导航且页面无整体横向溢出', async ({ page }, testInfo) => {

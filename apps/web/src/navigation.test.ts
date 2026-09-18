@@ -1,13 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { visibleRouteKeysForRole } from './App';
+import { routes, visibleRouteKeysForRole } from './App';
 
 describe('移动导航权限', () => {
   it('仓库角色包含完整库存作业入口', () => {
     expect(visibleRouteKeysForRole('WAREHOUSE')).toEqual([
       '/',
-      '/warehouse-virtual',
+      '/virtual-warehouse',
       '/approvals',
+      '/notifications',
       '/inventory/management',
+      '/inventory/warehouse-management',
       '/production/tasks',
       '/materials/raw',
       '/materials/finished',
@@ -23,6 +25,13 @@ describe('移动导航权限', () => {
     expect(routes).toContain('/approvals');
     expect(routes).not.toContain('/stock-documents');
     expect(routes).not.toContain('/stock-reports');
+    expect(routes).not.toContain('/inventory/warehouse-management');
     expect(routes).not.toContain('/users');
+  });
+
+  it('BOM 菜单由 bom.view 权限控制，而非管理员角色硬编码', () => {
+    const bom = routes.find(route => route.key === '/boms');
+    expect(bom?.roles).toEqual([]);
+    expect(bom?.permission).toBe('bom.view');
   });
 });

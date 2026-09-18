@@ -18,6 +18,7 @@ import { DeleteOutlined, PlusOutlined } from '@ant-design/icons';
 import { api } from './api';
 import { PageScaffold, StatusTag } from './components';
 import { ResponsiveTable as Table } from './responsive';
+import { useLocation } from 'react-router-dom';
 
 const zoneCode = (warehouseCode: string | undefined, sequenceNo: unknown) => {
   const code = String(warehouseCode || '').trim().toUpperCase();
@@ -33,7 +34,9 @@ const locationCodes = (warehouseCode: string | undefined, zoneName: unknown, cou
 };
 
 export function WarehouseArchivePage() {
+  const route = useLocation();
   const [warehouses, setWarehouses] = useState<any[]>([]);
+  const [users, setUsers] = useState<any[]>([]);
   const [editing, setEditing] = useState<any>();
   const [detail, setDetail] = useState<any>();
   const [open, setOpen] = useState(false);
@@ -44,7 +47,9 @@ export function WarehouseArchivePage() {
 
   const load = async () => {
     try {
-      setWarehouses(await api('/warehouses'));
+      const [warehouseRows, userRows] = await Promise.all([api('/warehouses'), api('/users?pageSize=100')]);
+      setWarehouses(warehouseRows);
+      setUsers(userRows.items || []);
     } catch (error: any) {
       message.error(error.message);
     }
@@ -62,24 +67,28 @@ export function WarehouseArchivePage() {
     });
     setOpen(true);
   };
+  useEffect(() => { if (new URLSearchParams(route.search).get('create') === '1') create(); }, [route.search]);
   const edit = async (record: any) => {
     try {
-      const detail = await api(`/warehouses/${record.id}`);
+      const [detail, managers] = await Promise.all([api(`/warehouses/${record.id}`), api(`/warehouses/${record.id}/managers`)]);
       setEditing(detail);
       setNextSequence(Math.max(0, ...detail.zones.map((zone: any) => Number(zone.sequenceNo))) + 1);
-      form.setFieldsValue(detail);
+      form.setFieldsValue({ ...detail, managerIds: managers.map((manager: any) => manager.id) });
       setOpen(true);
     } catch (error: any) {
       message.error(error.message);
     }
   };
   const view = async (record: any) => {
-    try { setDetail(await api(`/warehouses/${record.id}`)); } catch (error: any) { message.error(error.message); }
+    try {
+      const [warehouseDetail, managers] = await Promise.all([api(`/warehouses/${record.id}`), api(`/warehouses/${record.id}/managers`)]);
+      setDetail({ ...warehouseDetail, managers });
+    } catch (error: any) { message.error(error.message); }
   };
   const save = async (values: any) => {
     setSaving(true);
     try {
-      await api(editing ? `/warehouses/${editing.id}` : '/warehouses', {
+      const warehouse = await api(editing ? `/warehouses/${editing.id}` : '/warehouses', {
         method: editing ? 'PATCH' : 'POST',
         body: JSON.stringify({
           ...values,
@@ -87,6 +96,7 @@ export function WarehouseArchivePage() {
           zones: values.zones.map((zone: any) => ({ ...zone, sequenceNo: Number(zone.sequenceNo) })),
         }),
       });
+      await api(`/warehouses/${editing?.id || warehouse.id}/managers`, { method: 'PUT', body: JSON.stringify({ userIds: values.managerIds || [] }) });
       message.success('仓库和库区已保存');
       setOpen(false);
       await load();
@@ -157,6 +167,7 @@ export function WarehouseArchivePage() {
             <Col xs={24} sm={12}><Form.Item label="仓库状态" name="status" rules={[{ required: true }]}>
               <Select options={[{ value: 'ACTIVE', label: '启用' }, { value: 'INACTIVE', label: '停用' }]} />
             </Form.Item></Col>
+            <Col xs={24}><Form.Item label="仓库管理员" name="managerIds" extra="可选择多名人员；绑定后仅能操作其负责仓库的库存业务。"><Select mode="multiple" showSearch optionFilterProp="label" options={users.filter(user => user.positionType === 'WAREHOUSE_MANAGER' && user.status === 'ACTIVE').map(user => ({ value: user.id, label: `${user.name}（${user.username}）` }))} /></Form.Item></Col>
           </Row>
           <div className="warehouse-zone-heading">
             <strong>库区明细</strong>
@@ -217,6 +228,7 @@ export function WarehouseArchivePage() {
           { label: '仓库类型', children: detail.warehouseType === 'RAW' ? '原材料库' : detail.warehouseType === 'FG' ? '成品库' : '不良品库' }, { label: '状态', children: <StatusTag value={detail.status} /> },
           { label: '物料数', children: detail.summary?.itemCount ?? 0 }, { label: '库存数量', children: detail.summary?.onHandQty ?? '0' },
           { label: '低库存', children: detail.summary?.lowStockCount ?? 0 }, { label: '零库存', children: detail.summary?.zeroStockCount ?? 0 },
+          { label: '仓库管理员', span: 2, children: detail.managers?.length ? detail.managers.map((manager: any) => `${manager.employeeName}（${manager.username}）`).join('、') : '未绑定' },
         ]} /><Table rowKey="id" dataSource={detail.zones || []} pagination={false} columns={[
           { title: '库区编码', dataIndex: 'code' }, { title: '库区名称', dataIndex: 'name' }, { title: '实际位置', dataIndex: 'actualLocation' }, { title: '标准库位', dataIndex: 'locationCount', align: 'right' }, { title: '实际库位', dataIndex: 'locationCountActual', align: 'right' }, { title: '状态', dataIndex: 'status', render: (value: string) => <StatusTag value={value} /> },
         ]} /></>}

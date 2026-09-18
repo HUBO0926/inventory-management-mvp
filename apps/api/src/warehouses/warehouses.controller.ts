@@ -6,31 +6,69 @@ import { CurrentUser, Permissions } from '../auth/auth.decorators';
 import { AuthUser } from '../common/constants';
 import { snapshotUser } from '../common/snapshot';
 import { BusinessException } from '../common/business.exception';
+import { WarehouseAccessService } from './warehouse-access.service';
+import { WarehouseStateService } from './warehouse-state.service';
 
 @ApiTags('仓库')
 @Controller('warehouses')
 export class WarehousesController {
-  constructor(private readonly db: DataSource) {}
+  constructor(private readonly db: DataSource, private readonly access: WarehouseAccessService, private readonly state: WarehouseStateService) {}
 
   @Get()
   @Permissions('master.view')
-  async list() {
+  async list(@CurrentUser() u: AuthUser) {
     return this.db.query(
       `SELECT w.id,w.warehouse_code "warehouseCode",w.display_name "displayName",w.name,w.warehouse_type "warehouseType",w.status,
         (SELECT count(*) FROM warehouse_zones z WHERE z.warehouse_id=w.id AND z.deleted_at IS NULL)::int "zoneCount"
-       FROM warehouses w WHERE w.deleted_at IS NULL ORDER BY w.warehouse_code`
+       FROM warehouses w WHERE w.deleted_at IS NULL AND ($1='ADMIN' OR EXISTS(SELECT 1 FROM warehouse_manager wm WHERE wm.warehouse_id=w.id AND wm.user_id=$2) OR $3=true) ORDER BY w.warehouse_code`,
+      [u.role, u.id, Boolean(u.permissions?.includes('warehouse.view-all'))],
     );
+  }
+
+  @Get(':id/managers')
+  @Permissions('master.view')
+  async managers(@Param('id') id: string) {
+    return this.db.query(`SELECT u.id,u.username,u.name "employeeName",wm.created_at "boundAt",b.name "boundByName"
+      FROM warehouse_manager wm JOIN users u ON u.id=wm.user_id LEFT JOIN users b ON b.id=wm.created_by
+      WHERE wm.warehouse_id=$1 AND u.deleted_at IS NULL ORDER BY u.name`, [id]);
+  }
+
+  @Put(':id/managers')
+  @Permissions('master.manage')
+  async setManagers(@Param('id') id: string, @Body() dto: { userIds: string[] }, @CurrentUser() u: AuthUser) {
+    const ids = [...new Set(dto.userIds || [])];
+    const qr = this.db.createQueryRunner(); await qr.connect(); await qr.startTransaction();
+    try {
+      const [warehouse] = await qr.query(`SELECT id FROM warehouses WHERE id=$1 AND deleted_at IS NULL FOR UPDATE`, [id]);
+      if (!warehouse) throw new BusinessException('NOT_FOUND', '仓库不存在');
+      if (ids.length) {
+        const [{ count }] = await qr.query(`SELECT count(*)::int count FROM users WHERE id=ANY($1::uuid[]) AND status='ACTIVE' AND deleted_at IS NULL AND position_type='WAREHOUSE_MANAGER'`, [ids]);
+        if (Number(count) !== ids.length) throw new BusinessException('VALIDATION_ERROR', '只能绑定启用的仓库管理员账号');
+      }
+      await qr.query(`DELETE FROM warehouse_manager WHERE warehouse_id=$1`, [id]);
+      if (ids.length) await qr.query(`INSERT INTO warehouse_manager(warehouse_id,user_id,created_by) SELECT $1,unnest($2::uuid[]),$3`, [id, ids, u.id]);
+      await qr.commitTransaction();
+      return this.managers(id);
+    } catch (e) { await qr.rollbackTransaction(); throw e; } finally { await qr.release(); }
   }
 
   @Get('virtual-overview')
   @Permissions('warehouse.virtual.view')
-  async virtualOverviewEndpoint() {
-    return this.virtualOverviewData();
+  async virtualOverviewEndpoint(@CurrentUser() u: AuthUser) {
+    const data = await this.state.tree(u);
+    return { totals: data.summary, warehouses: data.warehouses };
+  }
+
+  @Get('storage-state')
+  @Permissions('warehouse.virtual.view')
+  async storageState(@Query('warehouseId') warehouseId: string | undefined, @CurrentUser() u: AuthUser) {
+    return warehouseId ? this.state.workspace(u, warehouseId) : this.state.tree(u);
   }
 
   @Get(':id')
   @Permissions('warehouse.virtual.view')
-  async get(@Param('id') id: string) {
+  async get(@Param('id') id: string, @CurrentUser() u?: AuthUser) {
+    if (u) await this.assertWarehouseAccess(id, u);
     const [warehouse] = await this.db.query(
       `SELECT id,warehouse_code "warehouseCode",display_name "displayName",name,
         warehouse_type "warehouseType",status,created_at "createdAt",updated_at "updatedAt"
@@ -417,7 +455,8 @@ export class WarehousesController {
 
   @Get(':id/overview')
   @Permissions('warehouse.virtual.view')
-  async overview(@Param('id') id: string) {
+  async overview(@Param('id') id: string, @CurrentUser() u: AuthUser) {
+    await this.assertWarehouseAccess(id, u);
     const [warehouse] = await this.db.query(`SELECT * FROM warehouses WHERE id=$1`, [id]);
     if (!warehouse) return null;
     const [stats] = await this.db.query(`
@@ -437,7 +476,8 @@ export class WarehousesController {
 
   @Get(':id/locations')
   @Permissions('warehouse.virtual.view')
-  async locations(@Param('id') id: string, @Query() q: any) {
+  async locations(@Param('id') id: string, @Query() q: any, @CurrentUser() u: AuthUser) {
+    await this.assertWarehouseAccess(id, u);
     const params: any[] = [id];
     const where = ['l.warehouse_id=$1'];
     if (q.keyword) {
@@ -463,21 +503,71 @@ export class WarehousesController {
 
   @Get(':id/locations/:locId/stock')
   @Permissions('warehouse.virtual.view')
-  async locationStock(@Param('id') id: string, @Param('locId') locId: string) {
+  async locationStock(@Param('id') id: string, @Param('locId') locId: string, @CurrentUser() u: AuthUser) {
+    await this.assertWarehouseAccess(id, u);
     return this.db.query(`
       SELECT sb.id,i.id "itemId",i.item_code "itemCode",i.name "itemName",i.model,i.spec,i.unit,
-        sb.on_hand_qty "onHandQty",sb.frozen_qty "frozenQty",b.batch_no "batchNo"
+        sb.on_hand_qty "totalQty",
+        GREATEST(sb.on_hand_qty-COALESCE(sb.frozen_qty,0)-COALESCE(res.qty,0),0)::numeric(18,0) "availableQty",
+        (COALESCE(sb.frozen_qty,0)+COALESCE(res.qty,0))::numeric(18,0) "lockedQty",
+        sb.frozen_qty "frozenQty",COALESCE(res.qty,0)::numeric(18,0) "reservedQty",b.batch_no "batchNo",
+        inbound."lastInboundAt",
+        CASE WHEN sb.on_hand_qty=0 THEN 'ZERO' WHEN sb.on_hand_qty<=i.minimum_stock THEN 'LOW' ELSE 'NORMAL' END "stockStatus"
       FROM stock_balances sb
       JOIN items i ON i.id=sb.item_id
       LEFT JOIN inventory_batches b ON b.id=sb.batch_id
+      LEFT JOIN (SELECT warehouse_id,location_id,item_id,batch_id,sum(quantity) qty FROM stock_reservations WHERE status='ACTIVE' GROUP BY warehouse_id,location_id,item_id,batch_id) res
+        ON res.warehouse_id=sb.warehouse_id AND res.location_id=sb.location_id AND res.item_id=sb.item_id AND res.batch_id IS NOT DISTINCT FROM sb.batch_id
+      LEFT JOIN LATERAL (SELECT max(created_at) "lastInboundAt" FROM stock_transactions st WHERE st.warehouse_id=sb.warehouse_id AND st.location_id=sb.location_id AND st.item_id=sb.item_id AND st.batch_id IS NOT DISTINCT FROM sb.batch_id AND st.delta_qty>0) inbound ON true
       WHERE sb.location_id=$1 AND sb.warehouse_id=$2
-      ORDER BY i.item_code
+      ORDER BY i.item_code,b.batch_no NULLS FIRST
     `, [locId, id]);
+  }
+
+  @Get(':id/workspace-state')
+  @Permissions('warehouse.virtual.view')
+  async workspaceState(@Param('id') id: string, @CurrentUser() u: AuthUser) {
+    return this.state.workspace(u, id);
+  }
+
+  @Get(':id/areas/:areaId/material-summary')
+  @Permissions('warehouse.virtual.view')
+  async areaMaterialSummary(@Param('id') id: string, @Param('areaId') areaId: string, @CurrentUser() u: AuthUser) {
+    await this.assertWarehouseAccess(id, u);
+    const [area] = await this.db.query(`SELECT id,name FROM warehouse_zones WHERE id=$1 AND warehouse_id=$2 AND deleted_at IS NULL`, [areaId, id]);
+    if (!area) throw new BusinessException('NOT_FOUND', '库区不存在', HttpStatus.NOT_FOUND);
+    const materials = await this.db.query(`
+      SELECT i.id "materialId",i.item_code "materialCode",i.name "materialName",i.model,i.spec,i.unit,
+        COALESCE(sum(sb.on_hand_qty),0)::numeric(18,0) quantity,
+        COALESCE(sum(GREATEST(sb.on_hand_qty-COALESCE(sb.frozen_qty,0)-COALESCE(res.qty,0),0)),0)::numeric(18,0) "availableQuantity",
+        COALESCE(sum(COALESCE(sb.frozen_qty,0)+COALESCE(res.qty,0)),0)::numeric(18,0) "lockedQuantity",
+        count(DISTINCT sb.location_id)::int "locationCount"
+      FROM stock_balances sb JOIN items i ON i.id=sb.item_id JOIN warehouse_locations loc ON loc.id=sb.location_id
+      LEFT JOIN (SELECT warehouse_id,location_id,item_id,batch_id,sum(quantity) qty FROM stock_reservations WHERE status='ACTIVE' GROUP BY warehouse_id,location_id,item_id,batch_id) res
+        ON res.warehouse_id=sb.warehouse_id AND res.location_id=sb.location_id AND res.item_id=sb.item_id AND res.batch_id IS NOT DISTINCT FROM sb.batch_id
+      WHERE sb.warehouse_id=$1 AND loc.zone_id=$2 AND loc.is_archived=false
+      GROUP BY i.id ORDER BY i.item_code`, [id, areaId]);
+    return { areaId, areaName: area.name, materials };
+  }
+
+  @Get(':id/areas/:areaId/materials/:itemId/distribution')
+  @Permissions('warehouse.virtual.view')
+  async areaMaterialDistribution(@Param('id') id: string, @Param('areaId') areaId: string, @Param('itemId') itemId: string, @CurrentUser() u: AuthUser) {
+    await this.assertWarehouseAccess(id, u);
+    return this.db.query(`
+      SELECT loc.id "locationId",loc.code "locationCode",loc.name "locationName",b.batch_no "batchNo",
+        sb.on_hand_qty "totalQty",GREATEST(sb.on_hand_qty-COALESCE(sb.frozen_qty,0)-COALESCE(res.qty,0),0)::numeric(18,0) "availableQty",
+        (COALESCE(sb.frozen_qty,0)+COALESCE(res.qty,0))::numeric(18,0) "lockedQty"
+      FROM stock_balances sb JOIN warehouse_locations loc ON loc.id=sb.location_id LEFT JOIN inventory_batches b ON b.id=sb.batch_id
+      LEFT JOIN (SELECT warehouse_id,location_id,item_id,batch_id,sum(quantity) qty FROM stock_reservations WHERE status='ACTIVE' GROUP BY warehouse_id,location_id,item_id,batch_id) res
+        ON res.warehouse_id=sb.warehouse_id AND res.location_id=sb.location_id AND res.item_id=sb.item_id AND res.batch_id IS NOT DISTINCT FROM sb.batch_id
+      WHERE sb.warehouse_id=$1 AND loc.zone_id=$2 AND sb.item_id=$3 AND loc.is_archived=false ORDER BY loc.code,b.batch_no NULLS FIRST`, [id, areaId, itemId]);
   }
 
   @Get(':id/layouts')
   @Permissions('warehouse.virtual.view')
-  async listLayouts(@Param('id') id: string) {
+  async listLayouts(@Param('id') id: string, @CurrentUser() u: AuthUser) {
+    await this.access.assertWarehouse(u, id);
     return this.db.query(
       `SELECT id,layout_name "layoutName",layout_type "layoutType",version,status,canvas_width "canvasWidth",canvas_height "canvasHeight",
         created_by_name "createdByName",published_by_name "publishedByName",published_at "publishedAt",created_at "createdAt"
@@ -489,6 +579,7 @@ export class WarehousesController {
   @Post(':id/layouts')
   @Permissions('warehouse.layout.edit')
   async createLayout(@Param('id') id: string, @Body() dto: any, @CurrentUser() u: AuthUser) {
+    await this.access.assertWarehouse(u, id);
     const snap = snapshotUser(u);
     const layoutId = randomUUID();
     await this.db.query(
@@ -502,7 +593,10 @@ export class WarehousesController {
 
   @Put(':id/layouts/:layoutId/nodes')
   @Permissions('warehouse.layout.edit')
-  async saveNodes(@Param('id') id: string, @Param('layoutId') layoutId: string, @Body() dto: { nodes: any[] }) {
+  async saveNodes(@Param('id') id: string, @Param('layoutId') layoutId: string, @Body() dto: { nodes: any[] }, @CurrentUser() u: AuthUser) {
+    await this.access.assertWarehouse(u, id);
+    const [layout] = await this.db.query(`SELECT 1 FROM warehouse_layouts WHERE id=$1 AND warehouse_id=$2`, [layoutId, id]);
+    if (!layout) throw new BusinessException('NOT_FOUND', '仓库布局不存在', HttpStatus.NOT_FOUND);
     await this.db.query(`DELETE FROM warehouse_visual_nodes WHERE layout_id=$1`, [layoutId]);
     for (const node of dto.nodes) {
       await this.db.query(
@@ -519,6 +613,7 @@ export class WarehousesController {
   @Post(':id/layouts/:layoutId/publish')
   @Permissions('warehouse.layout.edit')
   async publishLayout(@Param('id') id: string, @Param('layoutId') layoutId: string, @CurrentUser() u: AuthUser) {
+    await this.access.assertWarehouse(u, id);
     const snap = snapshotUser(u);
     await this.db.query(
       `UPDATE warehouse_layouts SET status='PUBLISHED',published_by_user_id=$1,published_by_username=$2,published_by_name=$3,published_at=now(),updated_at=now()
@@ -534,12 +629,17 @@ export class WarehousesController {
 
   @Get(':id/layouts/:layoutId/nodes')
   @Permissions('warehouse.virtual.view')
-  async getNodes(@Param('id') id: string, @Param('layoutId') layoutId: string) {
+  async getNodes(@Param('id') id: string, @Param('layoutId') layoutId: string, @CurrentUser() u: AuthUser) {
+    await this.access.assertWarehouse(u, id);
     return this.db.query(
       `SELECT id,node_type "nodeType",business_id "businessId",parent_node_id "parentNodeId",code,name,
         x,y,width,height,rotation,layer,style_config "styleConfig",status
        FROM warehouse_visual_nodes WHERE layout_id=$1 ORDER BY layer,code`,
       [layoutId],
     );
+  }
+
+  private async assertWarehouseAccess(id: string, u: AuthUser) {
+    await this.access.assertWarehouse(u, id);
   }
 }

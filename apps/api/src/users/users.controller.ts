@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Put, Query } from '@nestjs/common';
 import { IsEnum, IsString, IsOptional, MaxLength, MinLength } from 'class-validator';
 import { ApiTags } from '@nestjs/swagger';
 import { CurrentUser, Permissions, Roles } from '../auth/auth.decorators';
@@ -17,6 +17,10 @@ class CreateUserDto {
   @IsOptional() @IsString() @MaxLength(30) phone: string;
   @IsOptional() @IsString() @MaxLength(100) email: string;
   @IsOptional() @IsString() @MaxLength(500) remarks: string;
+  @IsOptional() @IsString() positionType: string;
+  @IsOptional() @IsString() managerUserId: string;
+  @IsOptional() @IsString() departmentName: string;
+  @IsOptional() canApprove: boolean;
 }
 
 class UpdateUserDto {
@@ -29,6 +33,10 @@ class UpdateUserDto {
   @IsOptional() @IsString() @MaxLength(500) remarks: string;
   @IsOptional() @IsEnum(EntityStatus) status: EntityStatus;
   @IsOptional() @IsString() roleId: string;
+  @IsOptional() @IsString() positionType: string;
+  @IsOptional() @IsString() managerUserId: string;
+  @IsOptional() @IsString() departmentName: string;
+  @IsOptional() canApprove: boolean;
 }
 
 class StatusDto { @IsEnum(EntityStatus) status: EntityStatus; }
@@ -53,6 +61,23 @@ export class UsersController {
   @Patch(':id')
   @Permissions('user.manage')
   update(@Param('id') id: string, @Body() dto: UpdateUserDto, @CurrentUser() u: AuthUser) { return this.service.update(id, dto, u.id); }
+
+  @Get(':id')
+  @Permissions('user.manage')
+  get(@Param('id') id: string) { return this.service.get(id); }
+
+  @Get(':id/approval-manager')
+  approvalManager(@Param('id') id: string) { return this.service.approvalManager(id); }
+
+  @Get(':id/warehouses')
+  @Permissions('user.manage')
+  warehouses(@Param('id') id: string) { return this.service.warehouses(id); }
+
+  @Put(':id/warehouses')
+  @Permissions('user.manage')
+  setWarehouses(@Param('id') id: string, @Body() dto: { warehouseIds: string[] }, @CurrentUser() u: AuthUser) {
+    return this.service.setWarehouses(id, dto.warehouseIds || [], u.id);
+  }
 
   @Patch(':id/status')
   @Permissions('user.manage')

@@ -16,6 +16,8 @@ import { ApprovalHistoryDocumentRetention1830000000000 } from '../src/database/m
 import { ProductionPicking1840000000000 } from '../src/database/migrations/1840000000000-ProductionPicking';
 import { InventoryManagement1850000000000 } from '../src/database/migrations/1850000000000-InventoryManagement';
 import { IntegerQuantityDefectiveProcessing1860000000000 } from '../src/database/migrations/1860000000000-IntegerQuantityDefectiveProcessing';
+import { OrganizationApprovalBinding1870000000000 } from '../src/database/migrations/1870000000000-OrganizationApprovalBinding';
+import { ApprovalStateIntegrity1880000000000 } from '../src/database/migrations/1880000000000-ApprovalStateIntegrity';
 
 const baseConnection = {
   host: process.env.POSTGRES_HOST || 'localhost',
@@ -86,12 +88,16 @@ async function run() {
     WarehouseLocationManagement1810000000000,ApprovalCenter1820000000000,
     ApprovalHistoryDocumentRetention1830000000000,ProductionPicking1840000000000,
     InventoryManagement1850000000000,IntegerQuantityDefectiveProcessing1860000000000,
+    OrganizationApprovalBinding1870000000000,
+    ApprovalStateIntegrity1880000000000,
   ] });
   await final.initialize();
   const categoryMigrations = await final.runMigrations();
   if (!categoryMigrations.some(migration => migration.name === 'ItemCategoryTypes1770000000000')) throw new Error('Category type migration was not executed');
   if (!categoryMigrations.some(migration => migration.name === 'MasterDataFlexibility1780000000000')) throw new Error('Master data flexibility migration was not executed');
   if (!categoryMigrations.some(migration => migration.name === 'IntegerQuantityDefectiveProcessing1860000000000')) throw new Error('Integer quantity and defective processing migration was not executed');
+  if (!categoryMigrations.some(migration => migration.name === 'OrganizationApprovalBinding1870000000000')) throw new Error('Organization approval binding migration was not executed');
+  if (!categoryMigrations.some(migration => migration.name === 'ApprovalStateIntegrity1880000000000')) throw new Error('Approval state integrity migration was not executed');
   const [row] = await final.query(`
     SELECT i.unit_id,i.category_id,u.role_id,b.location_id,t.location_id transaction_location,
       t.balance_before,d.status
@@ -110,6 +116,11 @@ async function run() {
     WHERE table_schema='public' AND table_name IN ('defective_inventory_lots','defective_disposition_records')
   `);
   if(Number(defectiveTables?.count)!==2)throw new Error('Defective processing tables were not created');
+  const [organization] = await final.query(`SELECT employee_name,position_type,can_approve FROM users WHERE username='legacy-admin'`);
+  const [approval] = await final.query(`SELECT ai.status FROM approval_instance ai JOIN stock_documents d ON d.id=ai.document_id WHERE d.document_no='MI-LEGACY'`);
+  const [{ count: notificationTableCount }] = await final.query(`SELECT count(*)::int count FROM information_schema.tables WHERE table_schema='public' AND table_name='notification'`);
+  if (!organization || !approval || Number(notificationTableCount)!==1) throw new Error('Organization approval schema was not created or historical data was not migrated');
+  if ((await final.runMigrations()).length) throw new Error('Organization approval migration is not idempotent');
   const sharedCategories=await final.query(`SELECT item_type FROM item_categories WHERE code='SHARED' ORDER BY item_type`);
   const unusedCategories=await final.query(`SELECT item_type FROM item_categories WHERE code='UNUSED' ORDER BY item_type`);
   if(sharedCategories.length!==3||unusedCategories.length!==3)throw new Error('Historical categories were not split into all required item types');

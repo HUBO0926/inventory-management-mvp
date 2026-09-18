@@ -6,7 +6,6 @@ export enum Role {
 
 export enum ItemType {
   MATERIAL = 'MATERIAL',
-  SEMI_FINISHED = 'SEMI_FINISHED',
   FINISHED_GOOD = 'FINISHED_GOOD',
 }
 
@@ -68,4 +67,5 @@ export interface AuthUser {
   role: Role | string;
   roleId?: string;
   permissions?: string[];
+  isWarehouseManager?: boolean;
 }

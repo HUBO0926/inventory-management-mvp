@@ -1,375 +1,44 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import * as echarts from 'echarts';
-import { Alert, Button, Card, Descriptions, Drawer, Empty, Popover, Segmented, Space, Table, Tag, Tooltip } from 'antd';
-import {
-  AppstoreAddOutlined, BankOutlined, BoxPlotOutlined, ExpandOutlined, ExportOutlined,
-  CheckCircleFilled, ImportOutlined, InfoCircleOutlined, MenuOutlined, ReloadOutlined, RetweetOutlined,
-  SafetyCertificateOutlined, ToolOutlined, WarningOutlined, FileDoneOutlined,
-} from '@ant-design/icons';
-import { useNavigate } from 'react-router-dom';
+import { DndContext } from '@dnd-kit/core';
+import { Layer, Rect, Stage, Text } from 'react-konva';
+import { motion } from 'motion/react';
+import { Alert, Button, Card, Descriptions, Drawer, Empty, Segmented, Space, Table, Tabs, Tag, message } from 'antd';
+import { ApartmentOutlined, CompressOutlined, DatabaseOutlined, EditOutlined, ReloadOutlined, SaveOutlined } from '@ant-design/icons';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { api } from './api';
 import { PageScaffold } from './components';
-import { formatBeijingTime, formatQuantity, statusText } from './domain';
-import { useIsMobile } from './responsive';
+import { formatBeijingTime, formatQuantity } from './domain';
 
-type VirtualUser = { role?: string; permissions?: string[] };
-type ViewMode = 'ZONE' | 'LOCATION';
-type MapBox = { x: number; y: number; width: number; height: number };
+type User = { role?: string; permissions?: string[] }; type Mode = 'ZONE' | 'LOCATION';
+const label: Record<string, string> = { DISABLED: '已停用', FULL: '满库', LOCKED: '库存锁定', WARNING: '容量预警', LOW: '低库存', NORMAL: '正常', EMPTY: '空库位', ACTIVE: '启用', MATERIAL_INBOUND: '原材料入库', FINISHED_INBOUND: '成品入库', FINISHED_OUTBOUND: '成品出库', STOCK_MOVE: '移库', DRAFT: '草稿', SUBMITTED: '待审核', POSTED: '已过账' };
+const color: Record<string, string> = { DISABLED: '#d7dce3', FULL: '#ff7875', LOCKED: '#b37feb', WARNING: '#ffc53d', LOW: '#ffd666', NORMAL: '#73d13d', EMPTY: '#91caff' };
+const n = (v: any) => Number(v || 0); const show = (v: any, fallback = '—') => String(v || '').trim() || fallback; const can = (u: User | undefined, p: string) => u?.role === 'ADMIN' || Boolean(u?.permissions?.includes(p));
+const grid = (rows: any[]) => { const cols = Math.max(1, Math.ceil(Math.sqrt(Math.max(1, rows.length)))); return rows.map((row, i) => ({ ...row, x: row.x ?? 32 + (i % cols) * 168, y: row.y ?? 32 + Math.floor(i / cols) * 106, width: row.width ?? 146, height: row.height ?? 78 })); };
 
-const text = (value: unknown, fallback: string) => typeof value === 'string' && value.trim() ? value.trim() : fallback;
-const number = (value: unknown) => Number.isFinite(Number(value)) ? Number(value) : 0;
-const warehouseLabel = (row: any) => `${text(row?.warehouseCode, '未命名仓库')} ${text(row?.displayName || row?.name, '未命名仓库')}`;
-const zoneLabel = (row: any) => `${text(row?.code, '未命名库区')} ${text(row?.name, '未命名库区')}`;
-const locationLabel = (row: any) => `${text(row?.code, '未命名库位')} ${text(row?.name, '未命名库位')}`;
-const typeLabel = (type: string) => ({ RAW: '原材料库', FG: '成品库', DEFECTIVE: '不良品库' }[type] || '未定义仓库');
-const typeClass = (type: string) => ({ RAW: 'raw', FG: 'fg', DEFECTIVE: 'defective' }[type] || 'raw');
-const dateText = formatBeijingTime;
+function Chart({ rows, onPick }: { rows: any[]; onPick: (row: any) => void }) { const ref = useRef<HTMLDivElement>(null); useEffect(() => { if (!ref.current || !rows.length) return; const c = echarts.init(ref.current), units = [...new Set(rows.map(row => row.unit || '未设单位'))]; c.setOption({ animationDuration: 200, grid: { left: 55, right: 36, top: 30, bottom: 78 }, legend: { data: units }, tooltip: { trigger: 'axis' }, dataZoom: [{ type: 'inside' }, { type: 'slider', height: 14, bottom: 18 }], xAxis: { type: 'category', data: rows.map(row => row.materialCode), axisLabel: { rotate: 32 } }, yAxis: units.map((unit, i) => ({ type: 'value', name: unit, position: i ? 'right' : 'left', minInterval: 1 })), series: units.map((unit, i) => ({ name: unit, type: 'bar', yAxisIndex: i, data: rows.map(row => row.unit === unit ? n(row.quantity) : null), itemStyle: { color: ['#1677ff', '#13c2c2', '#722ed1'][i % 3], borderRadius: [4, 4, 0, 0] } })) }); c.on('click', (e: any) => rows[e.dataIndex] && onPick(rows[e.dataIndex])); const observer = new ResizeObserver(() => c.resize()); observer.observe(ref.current); return () => { observer.disconnect(); c.dispose(); }; }, [rows, onPick]); return rows.length ? <div className="virtual-unit-chart" ref={ref} /> : <Empty description="当前库区暂无库存物料" />; }
 
-const operations = [
-  { key: 'inbound', label: '原材料入库', path: '/inbound', icon: <ImportOutlined />, types: ['RAW'], permission: 'stock.create' },
-  { key: 'finishedInbound', label: '成品入库', path: '/finished-inbound', icon: <ImportOutlined />, types: ['FG'], permission: 'stock.create' },
-  { key: 'outbound', label: '成品出库', path: '/outbound', icon: <ExportOutlined />, types: ['FG'], permission: 'stock.create' },
-  { key: 'adjustment', label: '库存调整', path: '/adjustments', icon: <ToolOutlined />, types: ['RAW', 'FG', 'DEFECTIVE'], permission: 'stock.create' },
-  { key: 'issue', label: '生产领料', path: '/production/tasks?virtualAction=issue', icon: <BoxPlotOutlined />, types: ['RAW'], permission: 'production.issue' },
-  { key: 'return', label: '生产退料', path: '/production/tasks?virtualAction=return', icon: <SafetyCertificateOutlined />, types: ['RAW'], permission: 'production.issue' },
-  { key: 'move', label: '移库', path: '/moves', icon: <RetweetOutlined />, types: ['RAW', 'FG', 'DEFECTIVE'], permission: 'stock.create' },
-];
+function Canvas({ rows, selected, mode, editing, pick, move }: any) { const host = useRef<HTMLDivElement>(null), [size, setSize] = useState({ width: 700, height: 370 }), [view, setView] = useState({ x: 0, y: 0, scale: 1 }); useEffect(() => { const update = () => setSize({ width: host.current?.clientWidth || 700, height: host.current?.clientHeight || 370 }); update(); const watcher = new ResizeObserver(update); if (host.current) watcher.observe(host.current); return () => watcher.disconnect(); }, []); const nodes = grid(rows); return <div className="virtual-konva-wrap" ref={host}><div className="virtual-canvas-tools"><Button size="small" icon={<CompressOutlined />} onClick={() => setView({ x: 0, y: 0, scale: 1 })}>适配</Button></div><DndContext><Stage width={size.width} height={size.height} draggable={!editing} x={view.x} y={view.y} scaleX={view.scale} scaleY={view.scale} onWheel={(e: any) => { e.evt.preventDefault(); setView(value => ({ ...value, scale: Math.max(.55, Math.min(1.7, value.scale * (e.evt.deltaY > 0 ? .92 : 1.08))) })); }}><Layer>{nodes.map((row: any) => { const id = row.id || row.locationId, state = row.state || row.status || 'EMPTY', active = id === selected; return <Rect key={id} x={row.x} y={row.y} width={row.width} height={row.height} cornerRadius={9} fill={active ? '#e6f4ff' : '#fff'} stroke={color[state] || color.EMPTY} strokeWidth={active ? 3 : 1.4} shadowBlur={active ? 6 : 2} shadowOpacity={.12} draggable={editing} onClick={() => pick(id)} onTap={() => pick(id)} onDblClick={() => pick(id)} onDragEnd={(e: any) => move(id, { x: e.target.x(), y: e.target.y() })} />; })}{nodes.map((row: any) => { const state = row.state || row.status || 'EMPTY'; return <Text key={`text-${row.id || row.locationId}`} x={row.x + 10} y={row.y + 10} width={row.width - 20} fontSize={12} fontFamily="Microsoft YaHei" lineHeight={1.55} fill="#23324a" listening={false} text={`${mode === 'ZONE' ? `${row.code} ${row.name}` : `${row.locationCode} ${row.locationName}`}\n${label[state] || state} · ${row.itemTypeCount || 0} 物料`} />; })}</Layer></Stage></DndContext></div>; }
 
-function allowed(user: VirtualUser | undefined, permission: string) {
-  return user?.role === 'ADMIN' || !!user?.permissions?.includes(permission);
-}
-
-const warehouseOrder = (row: any) => ({ RAW: 0, FG: 1, DEFECTIVE: 2 }[row?.warehouseType as string] ?? 3);
-const sortWarehouses = (rows: any[]) => [...rows].sort((left, right) =>
-  warehouseOrder(left) - warehouseOrder(right)
-  || text(left?.warehouseCode, '').localeCompare(text(right?.warehouseCode, ''), 'zh-CN'));
-
-function stateColor(entity: any, warehouse: any) {
-  if (entity?.status !== 'ACTIVE' || warehouse?.status !== 'ACTIVE') return '#cbd5e1';
-  if (warehouse?.warehouseType === 'DEFECTIVE') return '#ef4444';
-  if (number(entity?.inventoryRecordCount ?? entity?.itemCount) === 0 || number(entity?.zeroStockCount) > 0 && number(entity?.itemCount) === 0) return '#94a3b8';
-  if (number(entity?.lowStockCount) > 0) return '#f59e0b';
-  return warehouse?.warehouseType === 'FG' ? '#1677ff' : '#16a34a';
-}
-
-function detailTitle(kind: 'warehouse' | 'zone' | 'location') {
-  return kind === 'warehouse' ? '仓库详情' : kind === 'zone' ? '库区详情' : '库位详情';
-}
-
-function DetailPanel({ entity, kind, warehouse, locations, balances, onAction, onTransactions, onInventory, onSelectZone, onBackWarehouse, onBackZone, user }: any) {
-  const currentLocations = kind === 'location'
-    ? locations.filter((row: any) => row.id === entity?.id)
-    : kind === 'zone' ? locations.filter((row: any) => row.zoneId === entity?.id) : locations;
-  const name = kind === 'warehouse' ? warehouseLabel(entity) : kind === 'zone' ? zoneLabel(entity) : locationLabel(entity);
-  const details = kind === 'warehouse' ? [
-    { key: 'code', label: '仓库编码', children: text(warehouse?.warehouseCode, '未命名仓库') },
-    { key: 'name', label: '仓库名称', children: text(warehouse?.name, '未命名仓库') },
-    { key: 'displayName', label: '显示名称', children: text(warehouse?.displayName || warehouse?.name, '未命名仓库') },
-    { key: 'type', label: '仓库类型', children: typeLabel(warehouse?.warehouseType) },
-    { key: 'status', label: '状态', children: <Tag color={warehouse?.status === 'ACTIVE' ? 'success' : 'default'}>{warehouse?.status === 'ACTIVE' ? '启用' : '停用'}</Tag> },
-    { key: 'updatedAt', label: '最近更新', children: dateText(warehouse?.updatedAt || warehouse?.lastInventoryAt) },
-  ] : [
-    { key: 'parent', label: '所属仓库', children: warehouseLabel(warehouse) },
-    { key: 'name', label: kind === 'zone' ? '库区名称' : '库位名称', children: name },
-    { key: 'position', label: '实际位置', children: text(entity?.actualLocation || entity?.positionDesc, '-') },
-    { key: 'status', label: '状态', children: <Tag color={entity?.status === 'ACTIVE' ? 'success' : 'default'}>{entity?.status === 'ACTIVE' ? '启用' : '停用'}</Tag> },
-  ];
-  const count = (key: string) => kind === 'warehouse'
-    ? number(entity?.summary?.[key] ?? entity?.[key] ?? warehouse?.summary?.[key] ?? warehouse?.[key])
-    : kind === 'zone' ? number(entity?.[key])
-      : key === 'locationCount' ? 1 : number(entity?.[key]);
-  return <>
-    <Descriptions className="virtual-detail-descriptions" column={1} size="small" items={details} />
-    {(kind === 'zone' || kind === 'location') && <div className="virtual-detail-return"><Button type="link" onClick={kind === 'zone' ? onBackWarehouse : onBackZone}>{kind === 'zone' ? '返回仓库总览' : '返回库区详情'}</Button></div>}
-    <div className="virtual-detail-stats">
-      <span><small>{kind === 'warehouse' ? '库区数量' : '库位数量'}</small><strong>{kind === 'warehouse' ? count('zoneCount') : count('activeLocationCount') || count('locationCount')}</strong></span>
-      {kind === 'warehouse' && <span><small>库位数量</small><strong>{count('locationCount')}</strong></span>}
-      <span><small>物料种类</small><strong>{count('itemCount')}</strong></span>
-      <span><small>库存记录</small><strong>{count('inventoryRecordCount')}</strong></span>
-      <span><small>低/零库存</small><strong>{count('lowStockCount')}/{count('zeroStockCount')}</strong></span>
-    </div>
-    {kind === 'location' && <div className="virtual-location-stock">
-      <div className="virtual-detail-subtitle">库存明细与批次</div>
-      <Table size="small" pagination={false} rowKey={(row: any) => `${row.itemId || ''}-${row.batchId || ''}`} dataSource={balances.filter((row: any) => row.locationId === entity?.id)} locale={{ emptyText: '该库位暂无库存明细' }} columns={[
-        { title: '物料', render: (_: any, row: any) => `${text(row.itemCode, '未命名物料')} ${text(row.itemName, '')}` },
-        { title: '批次', dataIndex: 'batchNo', render: (value: any) => text(value, '-') },
-        { title: '数量', dataIndex: 'onHandQty', align: 'right', render: formatQuantity },
-      ]} />
-    </div>}
-    {kind !== 'location' && <div className="virtual-location-stock">
-      <div className="virtual-detail-subtitle">库位清单</div>
-      <Table size="small" pagination={false} rowKey="id" dataSource={kind === 'warehouse' ? (entity?.zones || warehouse?.zones || []) : currentLocations.slice(0, 6)} onRow={(row: any) => kind === 'warehouse' ? { onClick: () => onSelectZone(row.id) } : {}} locale={{ emptyText: kind === 'warehouse' ? '暂无库区' : '暂无库位' }} columns={kind === 'warehouse' ? [
-        { title: '库区', render: (_: any, row: any) => zoneLabel(row) }, { title: '位置', dataIndex: 'actualLocation', render: (value: any) => text(value, '-') }, { title: '库位', dataIndex: 'activeLocationCount', align: 'right', render: (value: any) => number(value) }, { title: '物料', dataIndex: 'itemCount', align: 'right', render: (value: any) => number(value) }, { title: '状态', dataIndex: 'status', render: (value: any) => <Tag color={value === 'ACTIVE' ? 'success' : 'default'}>{value === 'ACTIVE' ? '正常' : '停用'}</Tag> },
-      ] : [
-        { title: '库位', render: (_: any, row: any) => locationLabel(row) },
-        { title: '物料', dataIndex: 'itemCount', align: 'right', render: (value: any) => number(value) },
-        { title: '库存记录', dataIndex: 'inventoryRecordCount', align: 'right', render: (value: any) => number(value) },
-        { title: '状态', dataIndex: 'status', render: (value: any) => <Tag color={value === 'ACTIVE' ? 'success' : 'default'}>{value === 'ACTIVE' ? '正常' : '停用'}</Tag> },
-      ]} />
-    </div>}
-    <div className="virtual-detail-actions">
-      {warehouse?.warehouseType !== 'DEFECTIVE' && <Button type="primary" disabled={!allowed(user, 'stock.create')} onClick={() => onAction(warehouse?.warehouseType === 'FG' ? '/finished-inbound' : '/inbound')}>在此{kind === 'warehouse' ? '仓库' : kind === 'zone' ? '库区' : '库位'}入库</Button>}
-      <Button disabled={!allowed(user, 'stock.create')} onClick={() => onAction('/adjustments')}>库存调整</Button>
-      <Button disabled={!allowed(user, 'stock.create')} onClick={() => onAction('/moves')}>移库</Button>
-      <Button onClick={onInventory}>查看库存</Button>
-      <Button onClick={onTransactions}>查看流水</Button>
-    </div>
-  </>;
-}
-
-export function WarehouseVirtualMapPage({ user }: { user?: VirtualUser }) {
-  const mobile = useIsMobile();
-  const nav = useNavigate();
-  const mapRef = useRef<HTMLDivElement>(null);
-  const workspaceRef = useRef<HTMLDivElement>(null);
-  const retryRef = useRef<number | undefined>(undefined);
-  const [overview, setOverview] = useState<any>({ totals: {}, warehouses: [] });
-  const [selectedWarehouseId, setSelectedWarehouseId] = useState<string>();
-  const [selectedZoneId, setSelectedZoneId] = useState<string>();
-  const [selectedLocationId, setSelectedLocationId] = useState<string>();
-  const [viewMode, setViewMode] = useState<ViewMode>('LOCATION');
-  const [warehouseDetail, setWarehouseDetail] = useState<any>();
-  const [locations, setLocations] = useState<any[]>([]);
-  const [balances, setBalances] = useState<any[]>([]);
-  const [transactions, setTransactions] = useState<any[]>([]);
-  const [documents, setDocuments] = useState<any[]>([]);
-  const [layoutNodes, setLayoutNodes] = useState<any[]>([]);
-  const [layoutCanvas, setLayoutCanvas] = useState({ width: 1200, height: 800 });
-  const [loading, setLoading] = useState(true);
-  const [detailLoading, setDetailLoading] = useState(false);
-  const [error, setError] = useState('');
-  const [detailOpen, setDetailOpen] = useState(false);
-  const [operationOpen, setOperationOpen] = useState(false);
-  const [fullscreen, setFullscreen] = useState(false);
-  const [approvalStats, setApprovalStats] = useState<any>({});
-
-  const warehouses = useMemo(() => sortWarehouses(Array.isArray(overview?.warehouses) ? overview.warehouses : []), [overview?.warehouses]);
-  const warehouse = warehouses.find((row: any) => row.id === selectedWarehouseId) || warehouses[0];
-  const zones = Array.isArray(warehouse?.zones) ? warehouse.zones : [];
-  const selectedZone = zones.find((row: any) => row.id === selectedZoneId);
-  const selectedLocation = locations.find((row: any) => row.id === selectedLocationId);
-  const currentDetail = selectedLocation || selectedZone || warehouseDetail || warehouse;
-  const currentDetailKind: 'warehouse' | 'zone' | 'location' = selectedLocation ? 'location' : selectedZone ? 'zone' : 'warehouse';
-
-  const loadOverview = async (attempt = 0) => {
-    setLoading(true);
-    try {
-      const [result, approvalResult] = await Promise.all([api('/warehouses/virtual-overview'), api('/approvals/statistics').catch(() => ({}))]);
-      const next = { totals: result?.totals || {}, warehouses: sortWarehouses(Array.isArray(result?.warehouses) ? result.warehouses : []) };
-      setOverview(next); setApprovalStats(approvalResult || {}); setError('');
-      setSelectedWarehouseId((current) => next.warehouses.some((row: any) => row.id === current)
-        ? current
-        : next.warehouses.find((row: any) => row.status === 'ACTIVE' && row.warehouseType === 'RAW')?.id
-          || next.warehouses.find((row: any) => row.status === 'ACTIVE')?.id
-          || next.warehouses[0]?.id);
-    } catch (cause: any) {
-      setError(cause?.message || 'NETWORK_ERROR: 暂时无法加载仓库地图');
-      if (attempt < 2) retryRef.current = window.setTimeout(() => { void loadOverview(attempt + 1); }, (attempt + 1) * 1200);
-    } finally { setLoading(false); }
-  };
-
-  const loadWarehouse = async (warehouseId: string) => {
-    setDetailLoading(true); setSelectedZoneId(undefined); setSelectedLocationId(undefined); setWarehouseDetail(undefined); setLocations([]); setBalances([]); setTransactions([]); setDocuments([]); setLayoutNodes([]); setDetailOpen(false);
-    try {
-      const [detail, locationRows, balanceRows, transactionRows, documentRows, layouts] = await Promise.all([
-        api(`/warehouses/${warehouseId}`), api(`/warehouses/${warehouseId}/locations`), api(`/inventory/balances?warehouseId=${warehouseId}&pageSize=100`), api(`/inventory/transactions?warehouseId=${warehouseId}&pageSize=10`), api(`/stock-documents?warehouseId=${warehouseId}&pageSize=10`), api(`/warehouses/${warehouseId}/layouts`),
-      ]);
-      setWarehouseDetail(detail || {});
-      setLocations(Array.isArray(locationRows) ? locationRows : []);
-      setBalances(Array.isArray(balanceRows?.items) ? balanceRows.items : []);
-      setTransactions(Array.isArray(transactionRows?.items) ? transactionRows.items : []);
-      setDocuments(Array.isArray(documentRows?.items) ? documentRows.items : []);
-      const published = Array.isArray(layouts) ? layouts.find((row: any) => row.status === 'PUBLISHED') : undefined;
-      setLayoutCanvas({ width: Math.max(1, number(published?.canvasWidth) || 1200), height: Math.max(1, number(published?.canvasHeight) || 800) });
-      if (published?.id) setLayoutNodes(await api(`/warehouses/${warehouseId}/layouts/${published.id}/nodes`));
-      setError('');
-    } catch (cause: any) { setError(cause?.message || 'NETWORK_ERROR: 仓库详情加载失败'); }
-    finally { setDetailLoading(false); }
-  };
-
-  useEffect(() => { void loadOverview(); return () => { if (retryRef.current) window.clearTimeout(retryRef.current); }; }, []);
-  useEffect(() => { if (selectedWarehouseId) void loadWarehouse(selectedWarehouseId); }, [selectedWarehouseId]);
-  useEffect(() => {
-    if (selectedZoneId && !zones.some((zone: any) => zone.id === selectedZoneId)) setSelectedZoneId(undefined);
-    if (selectedLocationId && !locations.some((location: any) => location.id === selectedLocationId && !location.isArchived)) setSelectedLocationId(undefined);
-  }, [zones, locations, selectedZoneId, selectedLocationId]);
-  useEffect(() => {
-    const handler = () => setFullscreen(Boolean(document.fullscreenElement));
-    document.addEventListener('fullscreenchange', handler);
-    return () => document.removeEventListener('fullscreenchange', handler);
-  }, []);
-
-  const locationStats = useMemo(() => locations.filter((location: any) => !location.isArchived).map((location: any) => {
-    const locationBalances = balances.filter((balance: any) => balance.locationId === location.id);
-    const derivedLow = locationBalances.filter((row: any) => number(row.onHandQty) > 0 && number(row.onHandQty) <= number(row.minimumStock)).length;
-    const derivedZero = locationBalances.filter((row: any) => number(row.onHandQty) === 0).length;
-    return {
-      ...location,
-      itemCount: Math.max(number(location.itemCount), new Set(locationBalances.map((row: any) => row.itemId)).size),
-      inventoryRecordCount: Math.max(number(location.inventoryRecordCount), locationBalances.length),
-      lowStockCount: Math.max(number(location.lowStockCount), derivedLow),
-      zeroStockCount: Math.max(number(location.zeroStockCount), derivedZero),
-      unitCount: Math.max(number(location.unitCount), new Set(locationBalances.map((row: any) => row.unit).filter(Boolean)).size),
-    };
-  }), [locations, balances]);
-
-  const mapLayout = useMemo(() => {
-    const count = Math.max(zones.length, 1);
-    const columns = count <= 3 ? count : Math.ceil(Math.sqrt(count));
-    const rows = Math.ceil(count / columns);
-    const zoneBoxes = new Map<string, MapBox>();
-    zones.forEach((zone: any, index: number) => {
-      const node = layoutNodes.find((item: any) => item.businessId === zone.id);
-      const auto: MapBox = { x: (index % columns) * (100 / columns) + 1.2, y: Math.floor(index / columns) * (100 / rows) + 2, width: 100 / columns - 2.4, height: 100 / rows - 4 };
-      zoneBoxes.set(zone.id, node ? {
-        x: Math.min(97, Math.max(0, number(node.x) / layoutCanvas.width * 100)),
-        y: Math.min(95, Math.max(0, number(node.y) / layoutCanvas.height * 100)),
-        width: Math.min(96, Math.max(13, number(node.width) / layoutCanvas.width * 100)),
-        height: Math.min(92, Math.max(14, number(node.height) / layoutCanvas.height * 100)),
-      } : auto);
-    });
-    const locationBoxes = new Map<string, MapBox>();
-    zones.forEach((zone: any) => {
-      const parent = zoneBoxes.get(zone.id);
-      if (!parent) return;
-      const items = locationStats.filter((row: any) => row.zoneId === zone.id);
-      const cols = Math.max(1, Math.ceil(Math.sqrt(Math.max(items.length, 1))));
-      const rowsInZone = Math.ceil(Math.max(items.length, 1) / cols);
-      items.forEach((location: any, index: number) => {
-        const node = layoutNodes.find((item: any) => item.businessId === location.id);
-        locationBoxes.set(location.id, node ? {
-          x: Math.min(98, Math.max(0, number(node.x) / layoutCanvas.width * 100)),
-          y: Math.min(96, Math.max(0, number(node.y) / layoutCanvas.height * 100)),
-          width: Math.min(45, Math.max(6, number(node.width) / layoutCanvas.width * 100)),
-          height: Math.min(28, Math.max(6, number(node.height) / layoutCanvas.height * 100)),
-        } : {
-          x: parent.x + 1.2 + (index % cols) * ((parent.width - 2.4) / cols),
-          y: parent.y + 9 + Math.floor(index / cols) * Math.max(8, (parent.height - 10) / rowsInZone),
-          width: Math.max(7, (parent.width - 3.8) / cols),
-          height: Math.max(7, (parent.height - 11.5) / rowsInZone),
-        });
-      });
-    });
-    return { zoneBoxes, locationBoxes };
-  }, [zones, locationStats, layoutNodes, layoutCanvas]);
-
-  useEffect(() => {
-    if (!mapRef.current || !warehouse || !zones.length) return;
-    const chart = echarts.init(mapRef.current);
-    const zoneData = zones.map((zone: any) => ({ entity: zone, value: mapLayout.zoneBoxes.get(zone.id) || { x: 0, y: 0, width: 20, height: 20 } }));
-    const locationData = locationStats.map((location: any) => ({ entity: location, value: mapLayout.locationBoxes.get(location.id) || { x: 0, y: 0, width: 10, height: 10 } }));
-    const makeRect = (params: any, chartApi: any, row: any, isLocation: boolean) => {
-      const value = chartApi.value as (index: number) => number;
-      const point = chartApi.coord([value(0), value(1)]);
-      const width = Math.abs(chartApi.size([value(2), 0])[0]) - (isLocation ? 5 : 9);
-      const height = Math.abs(chartApi.size([0, value(3)])[1]) - (isLocation ? 5 : 9);
-      const title = isLocation ? text(row.code, '未命名库位') : zoneLabel(row);
-      const recordText = isLocation ? `物料 ${number(row.itemCount)}` : `库位 ${number(row.activeLocationCount || row.locationCount)} · 物料 ${number(row.itemCount)}`;
-      const selected = isLocation ? row.id === selectedLocationId : row.id === selectedZoneId;
-      return {
-        type: 'group', children: [
-          { type: 'rect', shape: { x: point[0], y: point[1], width: Math.max(24, width), height: Math.max(22, height), r: isLocation ? 5 : 10 }, style: { fill: selected ? '#eaf3ff' : isLocation ? '#fff' : '#f8fbff', stroke: stateColor(row, warehouse), lineWidth: selected ? 4 : isLocation ? 1.5 : 2, shadowBlur: selected ? 8 : 0, shadowColor: selected ? stateColor(row, warehouse) : undefined, opacity: row.status === 'ACTIVE' ? 1 : .6 } },
-          { type: 'text', style: { x: point[0] + (isLocation ? 5 : 10), y: point[1] + (isLocation ? 5 : 9), text: `${title}\n${recordText}`, fill: isLocation ? '#23324a' : '#172b4d', font: isLocation ? '600 11px Microsoft YaHei' : '600 13px Microsoft YaHei', lineHeight: isLocation ? 16 : 20, width: Math.max(18, width - 10), overflow: 'truncate' } },
-        ],
-      };
-    };
-    chart.setOption({
-      animation: false, grid: { left: 0, top: 0, right: 0, bottom: 0 },
-      tooltip: { confine: true, formatter: (params: any) => {
-        const row = params.seriesName === '库位' ? locationData[params.dataIndex]?.entity : zoneData[params.dataIndex]?.entity;
-        if (!row) return '暂无详情';
-        return `<strong>${params.seriesName === '库位' ? locationLabel(row) : zoneLabel(row)}</strong><br/>物料种类：${number(row.itemCount)}<br/>库存记录：${number(row.inventoryRecordCount)}<br/>低库存：${number(row.lowStockCount)}`;
-      } },
-      xAxis: { show: false, min: 0, max: 100 }, yAxis: { show: false, min: 0, max: 100, inverse: true },
-      series: [
-        { name: '库区', type: 'custom', coordinateSystem: 'cartesian2d', data: zoneData.map(row => ({ value: [row.value.x, row.value.y, row.value.width, row.value.height] })), renderItem: (params: any, chartApi: any) => makeRect(params, chartApi, zoneData[params.dataIndex]?.entity, false), z: 1 },
-        ...(viewMode === 'LOCATION' ? [{ name: '库位', type: 'custom', coordinateSystem: 'cartesian2d', data: locationData.map(row => ({ value: [row.value.x, row.value.y, row.value.width, row.value.height] })), renderItem: (params: any, chartApi: any) => makeRect(params, chartApi, locationData[params.dataIndex]?.entity, true), z: 2 }] : []),
-      ],
-    });
-    chart.on('click', (params: any) => {
-      if (params.seriesName === '库位') {
-        const row = locationData[params.dataIndex]?.entity;
-        if (!row) return;
-        setSelectedLocationId(row.id); setSelectedZoneId(row.zoneId); if (mobile) setDetailOpen(true);
-      } else {
-        const row = zoneData[params.dataIndex]?.entity;
-        if (!row) return;
-        setSelectedZoneId(row.id); setSelectedLocationId(undefined); if (mobile) setDetailOpen(true);
-      }
-    });
-    chart.getZr().on('click', (event: any) => {
-      if (!event.target) { setSelectedZoneId(undefined); setSelectedLocationId(undefined); if (mobile) setDetailOpen(true); }
-    });
-    const observer = new ResizeObserver(() => chart.resize()); observer.observe(mapRef.current);
-    return () => { observer.disconnect(); chart.dispose(); };
-  }, [warehouse, zones, locationStats, mapLayout, viewMode, mobile, selectedZoneId, selectedLocationId]);
-
-  const open = (path: string) => {
-    if (!warehouse || warehouse.status !== 'ACTIVE') return;
-    const params = new URLSearchParams({ warehouseId: warehouse.id });
-    if (selectedZone?.id) params.set('zoneId', selectedZone.id);
-    if (selectedLocation?.id) params.set('locationId', selectedLocation.id);
-    nav(`${path}${path.includes('?') ? '&' : '?'}${params.toString()}`);
-  };
-  const toggleFullscreen = async () => {
-    try {
-      if (document.fullscreenElement) await document.exitFullscreen();
-      else await workspaceRef.current?.requestFullscreen();
-    } catch { setError('当前浏览器不支持地图全屏，请使用浏览器的全屏功能。'); }
-  };
-  const operationButtons = operations.map((operation) => {
-    const enabled = warehouse?.status === 'ACTIVE' && operation.types.includes(warehouse?.warehouseType) && allowed(user, operation.permission);
-    const reason = warehouse?.status !== 'ACTIVE' ? '仓库已停用' : !operation.types.includes(warehouse?.warehouseType) ? `${typeLabel(warehouse?.warehouseType)}不支持此操作` : !allowed(user, operation.permission) ? '当前账号没有操作权限' : '';
-    return <Tooltip key={operation.key} title={enabled ? operation.label : reason}><Button className="virtual-operation" disabled={!enabled} icon={operation.icon} onClick={() => open(operation.path)}>{operation.label}</Button></Tooltip>;
-  });
-  const metrics = [
-    ['\u5f85\u6211\u5ba1\u6838', approvalStats?.pendingMine, FileDoneOutlined, 'purple'],
-    ['启用仓库数', overview?.totals?.activeWarehouseCount, BankOutlined, 'blue'], ['启用库区数', overview?.totals?.activeZoneCount, AppstoreAddOutlined, 'cyan'],
-    ['启用库位数', overview?.totals?.activeLocationCount, BoxPlotOutlined, 'purple'], ['库存物料种类', overview?.totals?.itemCount, AppstoreAddOutlined, 'orange'],
-    ['低库存预警', overview?.totals?.lowStockCount, WarningOutlined, 'warning'], ['不良品库存记录', overview?.totals?.defectiveInventoryRecordCount, SafetyCertificateOutlined, 'danger'],
-  ] as const;
-
-  return <PageScaffold bare title="虚拟仓库" subtitle="直观查看全部仓库、库区与库位状态，并可直接发起库存作业。" extra={<Space wrap>
-    <Button icon={<ReloadOutlined />} loading={loading || detailLoading} onClick={() => { void loadOverview(); if (selectedWarehouseId) void loadWarehouse(selectedWarehouseId); }}>刷新数据</Button>
-    <Popover title="地图图例" content={<div className="virtual-legend"><span className="raw">正常原材料</span><span className="fg">正常成品</span><span className="low">低库存</span><span className="zero">零库存</span><span className="defective">不良品库</span><span className="inactive">停用</span></div>}><Button icon={<InfoCircleOutlined />}>图例说明</Button></Popover>
-    <Button icon={<ExpandOutlined />} onClick={() => void toggleFullscreen()}>{fullscreen ? '退出全屏' : '全屏查看'}</Button>
-  </Space>}>
-    {error && <Alert closable type="warning" showIcon message={error.replace(/^NETWORK_ERROR:\s*/, '')} action={<Button size="small" onClick={() => { void loadOverview(); if (selectedWarehouseId) void loadWarehouse(selectedWarehouseId); }}>重新加载</Button>} className="virtual-error" />}
-    <div className="virtual-dashboard" ref={workspaceRef}>
-      <div className="virtual-metrics-scroll"><section className="virtual-metrics">{metrics.map(([label, value, Icon, tone]) => <Card key={label} className={`virtual-metric virtual-metric-${tone}`}><span className="virtual-metric-icon"><Icon /></span><div><small>{label}</small><strong>{number(value)}</strong><em>{label === '低库存预警' ? '待处理预警' : '全局实时统计'}</em></div></Card>)}</section></div>
-      <Card className="virtual-overview-card" title="全部仓库" extra={<span className="virtual-overview-hint">点击卡片切换当前仓库</span>}>
-        {warehouses.length ? <div className="virtual-warehouse-cards">{warehouses.map((row: any) => {
-          const isSelected = row.id === warehouse?.id;
-          return <button key={row.id} type="button" aria-pressed={isSelected} onClick={() => { setSelectedZoneId(undefined); setSelectedLocationId(undefined); setSelectedWarehouseId(row.id); if (mobile) setDetailOpen(true); }} className={`virtual-warehouse-card ${typeClass(row.warehouseType)} ${isSelected ? 'is-selected' : ''} ${row.status !== 'ACTIVE' ? 'is-inactive' : ''}`}>
-          <div className="virtual-warehouse-card-title"><span><b>{text(row.warehouseCode, '未命名仓库')}</b> {text(row.displayName || row.name, '未命名仓库')}</span><div className="virtual-warehouse-card-badges">{isSelected && <span className="virtual-current-badge"><CheckCircleFilled /> 当前查看</span>}<Tag color={row.warehouseType === 'DEFECTIVE' ? 'error' : row.warehouseType === 'FG' ? 'success' : 'processing'}>{typeLabel(row.warehouseType)}</Tag></div></div>
-          <div className="virtual-warehouse-card-grid"><span><small>库区数</small><b>{number(row.activeZoneCount ?? row.zoneCount)}</b></span><span><small>库位数</small><b>{number(row.activeLocationCount ?? row.locationCount)}</b></span><span><small>物料种类</small><b>{number(row.itemCount)}</b></span><span><small>库存记录</small><b>{number(row.inventoryRecordCount)}</b></span><span><small>低库存</small><b>{number(row.lowStockCount)}</b></span></div>
-          <div className="virtual-warehouse-card-footer"><span>{row.status === 'ACTIVE' ? '启用中' : '已停用'}</span><span>最近更新 {dateText(row.lastInventoryAt)}</span></div>
-        </button>;
-        })}</div> : <Empty description="暂无仓库，请先在仓储档案中创建仓库与库区" />}
-      </Card>
-      {warehouse && <>
-        <div className="virtual-operation-bar">{mobile ? <Button block icon={<MenuOutlined />} onClick={() => setOperationOpen(true)}>打开库存作业</Button> : operationButtons}</div>
-        <div className="virtual-map-detail">
-          <Card className="virtual-map-panel" title="当前仓库 · 库区地图" extra={<Segmented value={viewMode} options={[{ label: '库区视图', value: 'ZONE' }, { label: '库位视图', value: 'LOCATION' }]} onChange={(value) => { setViewMode(value as ViewMode); setSelectedLocationId(undefined); }} />} loading={detailLoading}>
-            <div className="virtual-map-context"><strong>当前查看：{warehouseLabel(warehouse)}</strong><span>{typeLabel(warehouse.warehouseType)} · {viewMode === 'ZONE' ? '点击库区查看详情' : '点击库位查看库存明细与批次'}</span></div>
-            {zones.length ? <div ref={mapRef} className="virtual-map-canvas" /> : <Empty className="virtual-map-empty" description="当前仓库暂无库区；请在仓储档案中维护库区" />}
-            <div className="virtual-map-legend"><span><i className="raw" />正常原材料</span><span><i className="fg" />正常成品</span><span><i className="low" />低库存</span><span><i className="zero" />零库存</span><span><i className="defective" />不良品</span></div>
-          </Card>
-          {!mobile && <Card className="virtual-detail-panel" title={detailTitle(currentDetailKind)}>{currentDetail && <DetailPanel entity={currentDetail} kind={currentDetailKind} warehouse={warehouse} locations={locationStats} balances={balances} user={user} onAction={open} onTransactions={() => nav(`/inventory/management?tab=flows&warehouseId=${warehouse.id}`)} onInventory={() => nav(`/inventory/management?tab=reports&reportType=current&warehouseId=${warehouse.id}`)} onSelectZone={(zoneId: string) => { setSelectedZoneId(zoneId); setSelectedLocationId(undefined); }} onBackWarehouse={() => { setSelectedZoneId(undefined); setSelectedLocationId(undefined); }} onBackZone={() => setSelectedLocationId(undefined)} />}</Card>}
-        </div>
-      </>}
-      <div className="virtual-recent-grid">
-        <Card title="最近库存流水" extra={<Button type="link" onClick={() => nav(`/inventory/management?tab=flows${warehouse ? `&warehouseId=${warehouse.id}` : ''}`)}>查看全部</Button>}><Table size="small" rowKey="id" pagination={false} dataSource={transactions} locale={{ emptyText: '暂无库存流水' }} columns={[
-          { title: '时间', dataIndex: 'createdAt', render: dateText }, { title: '物料名称', render: (_: any, row: any) => `${text(row.itemCode, '未命名物料')} ${text(row.itemName, '')}` },
-          { title: '仓库 · 库位', render: (_: any, row: any) => `${text(row.warehouseCode, '未命名仓库')} · ${text(row.locationCode, '未命名库位')}` }, { title: '数量', dataIndex: 'deltaQty', align: 'right', render: formatQuantity },
-        ]} /></Card>
-        <Card title="最近库存单据" extra={<Button type="link" onClick={() => nav(`/inventory/management?tab=documents${warehouse ? `&warehouseId=${warehouse.id}` : ''}`)}>查看全部</Button>}><Table size="small" rowKey="id" pagination={false} dataSource={documents} locale={{ emptyText: '暂无库存单据' }} columns={[
-          { title: '单据编号', dataIndex: 'documentNo', render: (value: any) => text(value, '-') }, { title: '单据类型', dataIndex: 'documentType', render: (value: any) => statusText[value] || text(value, '-') },
-          { title: '仓库', render: (_: any, row: any) => text(row.warehouseName || row.warehouseCode, '未命名仓库') }, { title: '状态', dataIndex: 'status', render: (value: any) => <Tag color={value === 'POSTED' ? 'success' : value === 'VOIDED' ? 'default' : 'processing'}>{statusText[value] || text(value, '-')}</Tag> },
-        ]} /></Card>
-      </div>
-    </div>
-    <Drawer open={mobile && detailOpen} title={detailTitle(currentDetailKind)} width="100%" onClose={() => setDetailOpen(false)}>{currentDetail && warehouse && <DetailPanel entity={currentDetail} kind={currentDetailKind} warehouse={warehouse} locations={locationStats} balances={balances} user={user} onAction={open} onTransactions={() => nav(`/inventory/management?tab=flows&warehouseId=${warehouse.id}`)} onInventory={() => nav(`/inventory/management?tab=reports&reportType=current&warehouseId=${warehouse.id}`)} onSelectZone={(zoneId: string) => { setSelectedZoneId(zoneId); setSelectedLocationId(undefined); }} onBackWarehouse={() => { setSelectedZoneId(undefined); setSelectedLocationId(undefined); }} onBackZone={() => setSelectedLocationId(undefined)} />}</Drawer>
-    <Drawer open={mobile && operationOpen} title="库存作业" placement="bottom" height="auto" onClose={() => setOperationOpen(false)}><div className="virtual-mobile-operations">{operationButtons}</div></Drawer>
+export function WarehouseVirtualMapPage({ user }: { user?: User }) {
+  const nav = useNavigate(), currentRoute = useLocation(), query = useMemo(() => new URLSearchParams(currentRoute.search), [currentRoute.search]); const [index, setIndex] = useState<any>({ warehouses: [], summary: {} }); const [data, setData] = useState<any>(); const [warehouseId, setWarehouseId] = useState<string>(); const [mode, setMode] = useState<Mode>('ZONE'); const [zoneId, setZoneId] = useState<string>(); const [locationId, setLocationId] = useState<string>(); const [materials, setMaterials] = useState<any[]>([]); const [stock, setStock] = useState<any[]>([]); const [drawer, setDrawer] = useState<any>(); const [layout, setLayout] = useState<any>(); const [nodes, setNodes] = useState<any[]>([]); const [editing, setEditing] = useState(false); const [loading, setLoading] = useState(true); const [error, setError] = useState('');
+  const warehouses = index.warehouses || [], warehouse = warehouses.find((row: any) => row.id === warehouseId), zones = data?.zones || [], currentZone = zones.find((row: any) => row.id === zoneId), locations = data?.locations || [], currentLocation = locations.find((row: any) => row.locationId === locationId), scopedLocations = zoneId ? locations.filter((row: any) => row.zoneId === zoneId) : locations, selected = mode === 'ZONE' ? currentZone : currentLocation;
+  const loadIndex = async () => { setLoading(true); try { const next = await api('/warehouses/storage-state'); setIndex(next); const wanted = next.warehouses?.find((row: any) => row.warehouseCode === query.get('warehouse')); setWarehouseId((old: any) => next.warehouses?.some((row: any) => row.id === old) ? old : wanted?.id || next.warehouses?.[0]?.id); } catch (e: any) { setError(e.message || '数据加载失败'); } finally { setLoading(false); } };
+  const loadWorkspace = async (id: string) => { try { const [next, layouts] = await Promise.all([api(`/warehouses/${id}/workspace-state`), api(`/warehouses/${id}/layouts`)]); setData(next); const z = next.zones?.find((row: any) => row.code === query.get('zone')) || next.zones?.[0]; const l = next.locations?.find((row: any) => row.locationCode === query.get('location')); setZoneId(z?.id); setLocationId(l?.locationId); const active = layouts.find((row: any) => row.status === 'PUBLISHED') || layouts[0]; setLayout(active); setNodes(active ? await api(`/warehouses/${id}/layouts/${active.id}/nodes`) : []); } catch (e: any) { setError(e.message || '工作区加载失败'); } };
+  useEffect(() => { void loadIndex(); }, []); useEffect(() => { if (warehouseId) void loadWorkspace(warehouseId); }, [warehouseId]); useEffect(() => { if (!warehouseId) return; if (mode === 'ZONE' && zoneId) api(`/warehouses/${warehouseId}/areas/${zoneId}/material-summary`).then((r: any) => setMaterials(r.materials || []) as any).catch((e: any) => setError(e.message)); if (mode === 'LOCATION' && locationId) api(`/warehouses/${warehouseId}/locations/${locationId}/stock`).then(setStock).catch((e: any) => setError(e.message)); }, [warehouseId, mode, zoneId, locationId]);
+  const mapRows = useMemo(() => { const source = mode === 'ZONE' ? zones : scopedLocations, saved = new Map(nodes.map((node: any) => [node.businessId, node])); return source.map((row: any) => ({ ...row, id: mode === 'ZONE' ? row.id : row.locationId, ...(saved.get(mode === 'ZONE' ? row.id : row.locationId) || {}) })); }, [mode, zones, scopedLocations, nodes]);
+  const pick = (id: string) => mode === 'ZONE' ? (setZoneId(id), setLocationId(undefined)) : setLocationId(id); const move = (id: string, point: any) => setNodes(old => old.some((row: any) => row.businessId === id) ? old.map((row: any) => row.businessId === id ? { ...row, ...point } : row) : [...old, { businessId: id, ...point }]);
+  const save = async () => { if (!warehouseId) return; try { let active = layout; if (!active) { active = await api(`/warehouses/${warehouseId}/layouts`, { method: 'POST', body: JSON.stringify({ layoutName: '默认二维布局', layoutType: '2D' }) }); setLayout(active); } const saved = new Map(nodes.map((node: any) => [node.businessId, node])); const layoutRows = [...grid(zones).map((row: any) => ({ ...row, ...(saved.get(row.id) || {}), nodeType: 'ZONE', businessId: row.id })), ...grid(locations).map((row: any) => ({ ...row, ...(saved.get(row.locationId) || {}), nodeType: 'LOCATION', businessId: row.locationId }))]; await api(`/warehouses/${warehouseId}/layouts/${active.id}/nodes`, { method: 'PUT', body: JSON.stringify({ nodes: layoutRows.map((row: any) => ({ nodeType: row.nodeType, businessId: row.businessId, code: row.code || row.locationCode, name: row.name || row.locationName, x: row.x, y: row.y, width: row.width, height: row.height, layer: row.nodeType === 'ZONE' ? 1 : 2 })) }) }); await api(`/warehouses/${warehouseId}/layouts/${active.id}/publish`, { method: 'POST' }); message.success('布局已保存'); setEditing(false); await loadWorkspace(warehouseId); } catch (e: any) { message.error(e.message || '保存失败'); } };
+  const open = (path: string) => { if (!warehouse) return; const p = new URLSearchParams({ warehouseId: warehouse.id, warehouse: warehouse.warehouseCode }); if (currentZone) { p.set('zoneId', currentZone.id); p.set('zone', currentZone.code); } if (currentLocation) { p.set('locationId', currentLocation.locationId); p.set('location', currentLocation.locationCode); } nav(`${path}${path.includes('?') ? '&' : '?'}${p}`); };
+  const drill = async (item: any) => { if (!warehouseId || !zoneId) return; setDrawer({ item, rows: [] }); try { setDrawer({ item, rows: await api(`/warehouses/${warehouseId}/areas/${zoneId}/materials/${item.materialId}/distribution`) }); } catch (e: any) { setDrawer({ item, rows: [], error: e.message }); } };
+  const state = selected?.state || selected?.status || 'EMPTY'; const details = selected ? [{ key: 'warehouse', label: '仓库', children: `${warehouse?.name || '—'} (${warehouse?.warehouseCode || '—'})` }, { key: 'zone', label: '库区', children: currentZone ? `${currentZone.name} (${currentZone.code})` : '—' }, { key: 'node', label: mode === 'ZONE' ? '当前库区' : '当前库位', children: mode === 'ZONE' ? `${selected.code} ${selected.name}` : `${selected.locationCode} ${selected.locationName}` }, { key: 'state', label: '状态', children: <Tag color={color[state]}>{label[state] || state}</Tag> }, { key: 'items', label: '物料种类', children: selected.itemTypeCount || 0 }] : [];
+  const actions = mode === 'ZONE' && currentZone ? [{ text: '查看库位', run: () => setMode('LOCATION') }, { text: '查看详细信息', run: () => open('/inventory/warehouse-management') }, { text: '查看库存', run: () => open('/inventory/management?tab=reports') }, { text: '查看流水', run: () => open('/inventory/management?tab=flows') }] : [{ text: '入库', primary: true, permission: 'stock.create', run: () => open(warehouse?.warehouseType === 'FG' ? '/finished-inbound' : '/inbound') }, { text: '出库', permission: 'stock.create', run: () => open('/outbound') }, { text: '移库', permission: 'stock.move', run: () => open('/moves') }, { text: '库存调整', permission: 'stock.adjust', run: () => open('/adjustments') }, { text: '查看流水', run: () => open('/inventory/management?tab=flows') }, { text: '查看详细信息', run: () => open('/inventory/warehouse-management') }, ...(mode === 'LOCATION' ? [{ text: '配置容量', run: () => open('/inventory/warehouse-management') }] : [])];
+  return <PageScaffold bare title="虚拟仓库" subtitle="实时查看有权限仓库的库区、库位、库存和容量状态。" extra={<Space><Button icon={<ReloadOutlined />} loading={loading} onClick={() => { void loadIndex(); if (warehouseId) void loadWorkspace(warehouseId); }}>刷新</Button>{can(user, 'warehouse.layout.edit') && <Button icon={editing ? <SaveOutlined /> : <EditOutlined />} type={editing ? 'primary' : 'default'} onClick={() => editing ? void save() : setEditing(true)}>{editing ? '保存布局' : '编辑仓库布局'}</Button>}</Space>}>
+    {error && <Alert type="warning" showIcon closable message={error} className="virtual-error" onClose={() => setError('')} />}<div className="virtual-dashboard"><section className="virtual-metrics">{[['可查看仓库', index.summary?.warehouseCount, DatabaseOutlined], ['库区', index.summary?.zoneCount, ApartmentOutlined], ['库位', index.summary?.locationCount, DatabaseOutlined], ['物料种类', index.summary?.itemTypeCount, DatabaseOutlined], ['低库存', index.summary?.lowStockCount, DatabaseOutlined], ['满库库位', index.summary?.fullLocationCount, DatabaseOutlined]].map(([name, value, Icon]: any) => <Card key={name} className="virtual-metric"><span className="virtual-metric-icon"><Icon /></span><div><small>{name}</small><strong>{n(value)}</strong></div></Card>)}</section>
+      <Card className="virtual-overview-card" title="仓库范围"><div className="virtual-warehouse-cards">{warehouses.map((row: any) => <button type="button" key={row.id} className={row.id === warehouseId ? 'is-selected' : ''} onClick={() => setWarehouseId(row.id)}><b>{row.name} <small>{row.warehouseCode}</small></b><span>库区 {row.zones?.length || 0} · 库位 {row.locationCount || 0} · 物料 {row.itemTypeCount || 0}</span></button>)}</div></Card>
+      {warehouse && <div className="virtual-workspace"><section className="virtual-left-column"><Card className="virtual-map-panel" title="二维仓储地图" extra={<Segmented value={mode} options={[{ value: 'ZONE', label: '库区视图' }, { value: 'LOCATION', label: '库位视图' }]} onChange={value => { setMode(value as Mode); if (value === 'ZONE') setLocationId(undefined); }} />}><div className="virtual-map-context"><strong>{warehouse.name} · {warehouse.warehouseCode}</strong><span>{editing ? '编辑模式：拖动节点后保存' : '滚轮缩放，拖动画布平移，点击或双击节点聚焦'}</span></div><Canvas rows={mapRows} selected={mode === 'ZONE' ? zoneId : locationId} mode={mode} editing={editing} pick={pick} move={move} /><div className="virtual-legend">{Object.entries(color).map(([key, value]) => <span key={key}><i style={{ background: value }} />{label[key]}</span>)}</div></Card><Card className="virtual-stock-panel" title={mode === 'ZONE' ? '库区库存分析（按单位）' : '库位库存与批次明细'}>{mode === 'ZONE' ? currentZone ? <Chart rows={materials} onPick={drill} /> : <Empty description="请选择库区" /> : currentLocation ? <Table size="small" rowKey={(row: any) => `${row.itemId}-${row.batchNo || ''}`} dataSource={stock} pagination={false} scroll={{ y: 280, x: 860 }} columns={[{ title: '物料', render: (_: any, row: any) => `${row.itemCode} ${row.itemName}` }, { title: '批次', dataIndex: 'batchNo', render: show }, { title: '可用', dataIndex: 'availableQty', align: 'right', render: formatQuantity }, { title: '锁定', dataIndex: 'lockedQty', align: 'right', render: formatQuantity }, { title: '现存', dataIndex: 'totalQty', align: 'right', render: formatQuantity }, { title: '容量', render: (_: any, row: any) => currentLocation.items?.find((item: any) => item.itemId === row.itemId)?.capacityQty || '不限量' }]} /> : <Empty description="请选择库位" />}</Card></section>
+        <aside className="virtual-right-column"><motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: .18 }}><Card className="virtual-detail-panel" title={mode === 'ZONE' ? '库区详情' : '库位详情'}><Descriptions column={1} size="small" items={details} /></Card><Card className="virtual-stats-panel" title="按单位统计"><div className="virtual-detail-stats">{(data?.unitStatistics || []).map((row: any) => <span key={row.unit}><small>{row.unit}</small><strong>{formatQuantity(row.onHandQty)}</strong><em>可用 {formatQuantity(row.availableQty)}</em></span>)}</div></Card><Card className="virtual-actions-panel" title="功能操作"><div className="virtual-detail-actions">{actions.map((action: any) => <Button key={action.text} type={action.primary ? 'primary' : 'default'} disabled={Boolean(action.permission && !can(user, action.permission))} onClick={action.run}>{action.text}</Button>)}</div></Card></motion.div></aside></div>}
+      <Card className="virtual-recent-tabs" title="最近记录"><Tabs size="small" items={[{ key: 'flows', label: '最近库存流水', children: <Table size="small" rowKey="id" pagination={false} dataSource={data?.recentTransactions || []} columns={[{ title: '时间', dataIndex: 'createdAt', render: formatBeijingTime }, { title: '物料', render: (_: any, row: any) => `${row.itemCode} ${row.itemName}` }, { title: '库位', dataIndex: 'locationCode' }, { title: '数量', dataIndex: 'deltaQty', render: formatQuantity }]} /> }, { key: 'docs', label: '最近单据', children: <Table size="small" rowKey="id" pagination={false} dataSource={data?.recentDocuments || []} columns={[{ title: '单据编号', dataIndex: 'documentNo' }, { title: '单据类型', dataIndex: 'documentType', render: (value: string) => label[value] || value }, { title: '状态', dataIndex: 'status', render: (value: string) => label[value] || value }, { title: '时间', dataIndex: 'createdAt', render: formatBeijingTime }]} /> }]} /></Card></div>
+    <Drawer width={720} open={Boolean(drawer)} title={drawer ? `${drawer.item.materialCode} ${drawer.item.materialName} · 库区库存分布` : ''} onClose={() => setDrawer(undefined)}><Table size="small" rowKey={(row: any) => `${row.locationId}-${row.batchNo || ''}`} dataSource={drawer?.rows || []} pagination={false} locale={{ emptyText: drawer?.error || '暂无库存分布' }} columns={[{ title: '库位', render: (_: any, row: any) => `${row.locationCode} ${row.locationName}` }, { title: '批次', dataIndex: 'batchNo', render: show }, { title: '可用', dataIndex: 'availableQty', render: formatQuantity }, { title: '锁定', dataIndex: 'lockedQty', render: formatQuantity }, { title: '现存', dataIndex: 'totalQty', render: formatQuantity }]} /></Drawer>
   </PageScaffold>;
 }

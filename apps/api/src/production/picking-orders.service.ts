@@ -3,6 +3,7 @@ import Decimal from 'decimal.js';
 import { DataSource, QueryRunner } from 'typeorm';
 import { AuditService } from '../audit/audit.service';
 import { ApprovalHistoryService } from '../audit/approval-history.service';
+import { ApprovalWorkflowService } from '../approvals/approval-workflow.service';
 import { BusinessException } from '../common/business.exception';
 import { AuthUser, Direction, DocumentType, ProductionStatus } from '../common/constants';
 import { InventoryPostingService } from '../inventory/posting.service';
@@ -16,6 +17,7 @@ export class PickingOrdersService {
     private readonly reservations: StockReservationService,
     private readonly audit: AuditService,
     private readonly history: ApprovalHistoryService,
+    private readonly workflow: ApprovalWorkflowService,
   ) {}
 
   async shortages(orderId: string, manager: DataSource | QueryRunner = this.db) {
@@ -164,7 +166,7 @@ export class PickingOrdersService {
       await this.validateDocumentInventory(qr,id);
       await this.reservations.reserveDocument(qr,id);
       await qr.query(`UPDATE stock_documents SET status='SUBMITTED',submitted_by=$1,submitted_at=now(),updated_at=now() WHERE id=$2`,[user.id,id]);
-      await this.history.record(qr,id,'SUBMITTED',doc.status,'SUBMITTED',user.id);
+      await this.workflow.submit(qr, id, user.id, doc.status);
     });
   }
 
@@ -174,6 +176,7 @@ export class PickingOrdersService {
       if (!doc || doc.status!=='SUBMITTED') throw new BusinessException('INVALID_STATUS','只有待审核领料单可以撤回');
       await this.reservations.releaseDocument(qr,id);
       await qr.query(`UPDATE stock_documents SET status='DRAFT',submitted_by=NULL,submitted_at=NULL,updated_at=now() WHERE id=$1`,[id]);
+      await this.workflow.closePending(qr, id, 'REVOKED');
       await this.history.record(qr,id,'WITHDRAWN','SUBMITTED','DRAFT',user.id);
     });
   }

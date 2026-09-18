@@ -128,7 +128,7 @@ export function WarehousesPage() {
     <div className="toolbar"><span /><Button type="primary" onClick={() => { setEditing(undefined); form.resetFields(); form.setFieldsValue({ warehouseType: 'RAW' }); setOpen(true); }}>新增仓库</Button></div>
     <Table rowKey="id" dataSource={rows} columns={[
       { title: '编码', dataIndex: 'warehouseCode' }, { title: '名称', dataIndex: 'name' }, { title: '类型', dataIndex: 'warehouseType' }, { title: '状态', dataIndex: 'status', render: value => <StatusTag value={value} /> },
-      { title: '操作', render: (_, record) => <Space><Button type="link" onClick={() => { setEditing(record); form.setFieldsValue(record); setOpen(true); }}>编辑</Button><Popconfirm title="确认删除仓库？" onConfirm={() => remove(record.id)}><Button danger type="link">删除</Button></Popconfirm></Space> },
+      { title: '操作', render: (_, record) => <Space><Button type="link" onClick={async () => { setEditing(record); const managers=await api(`/warehouses/${record.id}/managers`).catch(()=>[]); form.setFieldsValue({...record,managerIds:(managers||[]).map((m:any)=>m.id)}); setOpen(true); }}>编辑</Button><Popconfirm title="确认删除仓库？" onConfirm={() => remove(record.id)}><Button danger type="link">删除</Button></Popconfirm></Space> },
     ]} />
     <Modal title={editing ? '编辑仓库' : '新增仓库'} open={open} onCancel={() => setOpen(false)} onOk={() => form.submit()}>
       <Form form={form} layout="vertical" onFinish={save}>
@@ -145,20 +145,50 @@ export function LocationsPage() {
   const [warehouses, setWarehouses] = useState<any[]>([]);
   const [zones, setZones] = useState<any[]>([]);
   const [locations, setLocations] = useState<any[]>([]);
+  const [items, setItems] = useState<any[]>([]);
+  const [capacities, setCapacities] = useState<any[]>([]);
   const [mode, setMode] = useState<'zone' | 'location'>();
+  const [capacityOpen, setCapacityOpen] = useState(false);
   const [form] = Form.useForm();
-  const load = () => Promise.all([api('/warehouses'), api('/warehouse-zones?pageSize=100'), api('/warehouse-locations?pageSize=100')]).then(([w, z, l]) => { setWarehouses(w); setZones(z.items.map(normalize)); setLocations(l.items.map(normalize)); }).catch(fail);
+  const [capacityForm] = Form.useForm();
+  const load = async () => {
+    try {
+      const [w, z, l, c, first] = await Promise.all([api('/warehouses'), api('/warehouse-zones?pageSize=100'), api('/warehouse-locations?pageSize=100'), api('/location-item-capacities'), api('/items?page=1&pageSize=100&status=ACTIVE')]);
+      const pages = Math.ceil(Number(first.total || 0) / 100);
+      const rest = pages > 1 ? await Promise.all(Array.from({ length: pages - 1 }, (_, index) => api(`/items?page=${index + 2}&pageSize=100&status=ACTIVE`))) : [];
+      setWarehouses(w); setZones(z.items.map(normalize)); setLocations(l.items.map(normalize)); setCapacities(c); setItems([...(first.items || []), ...rest.flatMap((page: any) => page.items || [])]);
+    } catch (error) { fail(error); }
+  };
   useEffect(() => { void load(); }, []);
   const save = async (values: any) => { try { await api(mode === 'zone' ? '/warehouse-zones' : '/warehouse-locations', { method: 'POST', body: JSON.stringify(values) }); message.success('保存成功'); setMode(undefined); load(); } catch (error) { fail(error); } };
-  return <PageScaffold title="库区与库位" subtitle="库存必须落到具体库位；每个仓库已自动生成默认库区和默认库位。">
+  const saveCapacity = async (values: any) => { try { await api('/location-item-capacities', { method: 'PUT', body: JSON.stringify({ ...values, capacity: String(values.capacity) }) }); message.success('物料容量已保存'); setCapacityOpen(false); capacityForm.resetFields(); void load(); } catch (error) { fail(error); } };
+  const removeCapacity = async (row: any) => { try { await api(`/location-item-capacities/${row.locationId}/${row.itemId}`, { method: 'DELETE' }); message.success('已取消该物料容量限制'); void load(); } catch (error) { fail(error); } };
+  return <PageScaffold title="库区、库位与容量" subtitle="库存必须落到具体库位；可按“库位 + 物料”设置入库容量上限。">
     <div className="toolbar"><span /><Space><Button onClick={() => { setMode('zone'); form.resetFields(); }}>新增库区</Button><Button type="primary" onClick={() => { setMode('location'); form.resetFields(); }}>新增库位</Button></Space></div>
     <Card title="库区"><Table rowKey="id" pagination={false} dataSource={zones} columns={[{ title: '仓库', dataIndex: 'warehouseId', render: id => warehouses.find(w => w.id === id)?.warehouseCode }, { title: '编码', dataIndex: 'code' }, { title: '名称', dataIndex: 'name' }, { title: '状态', dataIndex: 'status', render: value => <StatusTag value={value} /> }]} /></Card>
     <Card title="库位" style={{ marginTop: 16 }}><Table rowKey="id" pagination={false} dataSource={locations} columns={[{ title: '仓库', dataIndex: 'warehouseId', render: id => warehouses.find(w => w.id === id)?.warehouseCode }, { title: '编码', dataIndex: 'code' }, { title: '名称', dataIndex: 'name' }, { title: '状态', dataIndex: 'status', render: value => <StatusTag value={value} /> }]} /></Card>
+    <Card title="库位物料容量" style={{ marginTop: 16 }} extra={<Button type="primary" onClick={() => { capacityForm.resetFields(); setCapacityOpen(true); }}>配置物料容量</Button>}>
+      <Typography.Text type="secondary">未配置容量的物料在该库位不限量；容量按“库位 + 物料”分别维护。</Typography.Text>
+      <Table style={{ marginTop: 12 }} rowKey={(row: any) => `${row.locationId}-${row.itemId}`} pagination={false} dataSource={capacities} columns={[
+        { title: '仓库 / 库区 / 库位', render: (_: any, row: any) => `${row.warehouseCode} / ${row.zoneCode} / ${row.locationCode}` },
+        { title: '物料', render: (_: any, row: any) => `${row.itemCode} ${row.itemName}` },
+        { title: '容量', render: (_: any, row: any) => `${formatQuantity(row.capacity)} ${row.unit}` },
+        { title: '操作', render: (_: any, row: any) => <Popconfirm title="取消后该物料在此库位将不再受容量限制，确认继续？" onConfirm={() => removeCapacity(row)}><Button danger type="link">取消限制</Button></Popconfirm> },
+      ]} />
+    </Card>
     <Modal title={mode === 'zone' ? '新增库区' : '新增库位'} open={!!mode} onCancel={() => setMode(undefined)} onOk={() => form.submit()}>
       <Form form={form} layout="vertical" onFinish={save}>
         <Form.Item label="仓库" name="warehouseId" rules={[{ required: true }]}><Select options={warehouses.map(w => ({ value: w.id, label: `${w.warehouseCode} ${w.name}` }))} /></Form.Item>
         {mode === 'location' && <Form.Item noStyle shouldUpdate={(before, current) => before.warehouseId !== current.warehouseId}>{({ getFieldValue }) => <Form.Item label="库区" name="zoneId" rules={[{ required: true }]}><Select options={zones.filter(z => z.warehouseId === getFieldValue('warehouseId')).map(z => ({ value: z.id, label: `${z.code} ${z.name}` }))} /></Form.Item>}</Form.Item>}
         <Form.Item label="编码" name="code" rules={[{ required: true }]}><Input /></Form.Item><Form.Item label="名称" name="name" rules={[{ required: true }]}><Input /></Form.Item>
+      </Form>
+    </Modal>
+    <Modal title="配置库位物料容量" open={capacityOpen} onCancel={() => setCapacityOpen(false)} onOk={() => capacityForm.submit()} destroyOnHidden>
+      <Form form={capacityForm} layout="vertical" onFinish={saveCapacity}>
+        <Form.Item label="仓库" name="warehouseId" rules={[{ required: true }]}><Select options={warehouses.map(w => ({ value: w.id, label: `${w.warehouseCode} ${w.name}` }))} onChange={() => capacityForm.setFieldValue('locationId', undefined)} /></Form.Item>
+        <Form.Item noStyle shouldUpdate>{({ getFieldValue }) => <Form.Item label="库位" name="locationId" rules={[{ required: true }]}><Select showSearch optionFilterProp="label" options={locations.filter(location => location.warehouseId === getFieldValue('warehouseId')).map(location => ({ value: location.id, label: `${location.code} ${location.name}` }))} /></Form.Item>}</Form.Item>
+        <Form.Item label="物料" name="itemId" rules={[{ required: true }]}><Select showSearch optionFilterProp="label" options={items.map(item => ({ value: item.id, label: `${item.itemCode} ${item.name}（${item.unit}）` }))} /></Form.Item>
+        <Form.Item label="容量" name="capacity" rules={[{ required: true }]}><InputNumber min={1} precision={0} style={{ width: '100%' }} /></Form.Item>
       </Form>
     </Modal>
   </PageScaffold>;
@@ -192,14 +222,21 @@ export function StockDocumentsV110Page({ type }: { type: StockType }) {
   const meta = stockMeta[type];
   const adjustment = type === 'INVENTORY_ADJUSTMENT';
   const moving = type === 'STOCK_MOVE';
+  const inbound = type === 'MATERIAL_INBOUND' || type === 'FINISHED_INBOUND';
+  const outbound = type === 'FINISHED_OUTBOUND';
   const [rows, setRows] = useState<any[]>([]);
   const [items, setItems] = useState<any[]>([]);
+  const [sourceItems, setSourceItems] = useState<any[]>([]);
+  const [sourceItemsLoading, setSourceItemsLoading] = useState(false);
   const [warehouses, setWarehouses] = useState<any[]>([]);
   const [locations, setLocations] = useState<any[]>([]);
   const [batches, setBatches] = useState<any[]>([]);
   const [editing, setEditing] = useState<any>();
   const [open, setOpen] = useState(false);
   const [form] = Form.useForm();
+  const watchedWarehouseId = Form.useWatch('warehouseId', form);
+  const watchedLines = Form.useWatch('lines', form);
+  const [inventoryByKey, setInventoryByKey] = useState<Record<string, any>>({});
   const load = () => Promise.all([
     api(`/stock-documents?documentType=${type}&pageSize=100`), api(`/items?pageSize=100&status=ACTIVE${meta.itemType ? `&itemType=${meta.itemType}` : ''}`),
     api('/warehouses'), api('/warehouse-locations?pageSize=100'), api('/batches?pageSize=100'),
@@ -208,8 +245,40 @@ export function StockDocumentsV110Page({ type }: { type: StockType }) {
     setLocations(locationRows.items.map(normalize)); setBatches(batchRows.items.map(normalize));
   }).catch(fail);
   useEffect(() => { void load(); }, [type]);
+  useEffect(() => {
+    if (!open || !(outbound || moving) || !watchedWarehouseId) {
+      setSourceItems([]);
+      setSourceItemsLoading(false);
+      return;
+    }
+    let active = true;
+    const purpose = moving ? 'MOVE_SOURCE' : 'OUTBOUND';
+    const loadCandidates = async () => {
+      setSourceItemsLoading(true);
+      const first = await api(`/stock-documents/source-item-options?${new URLSearchParams({ warehouseId: watchedWarehouseId, purpose, page: '1', pageSize: '100' })}`);
+      const pageCount = Math.ceil(Number(first.total || 0) / Number(first.pageSize || 100));
+      const rest = await Promise.all(Array.from({ length: Math.max(0, pageCount - 1) }, (_, index) => api(`/stock-documents/source-item-options?${new URLSearchParams({ warehouseId: watchedWarehouseId, purpose, page: String(index + 2), pageSize: String(first.pageSize || 100) })}`)));
+      if (active) setSourceItems([...(first.items || []), ...rest.flatMap((page: any) => page.items || [])]);
+    };
+    void loadCandidates().catch(error => { if (active) fail(error); }).finally(() => { if (active) setSourceItemsLoading(false); });
+    return () => { active = false; };
+  }, [moving, open, outbound, watchedWarehouseId]);
+  useEffect(() => {
+    if (!(inbound || outbound || moving)) return;
+    const lines = watchedLines || [];
+    const requests = new Map<string, { warehouseId: string; itemId: string; purpose: string }>();
+    for (const line of lines) {
+      if (watchedWarehouseId && line?.itemId) requests.set(`${watchedWarehouseId}:${line.itemId}:${moving ? 'MOVE_SOURCE' : outbound ? 'OUTBOUND' : 'INBOUND'}`, { warehouseId: watchedWarehouseId, itemId: line.itemId, purpose: moving ? 'MOVE_SOURCE' : outbound ? 'OUTBOUND' : 'INBOUND' });
+      if (moving && line?.targetWarehouseId && line?.itemId) requests.set(`${line.targetWarehouseId}:${line.itemId}:MOVE_TARGET`, { warehouseId: line.targetWarehouseId, itemId: line.itemId, purpose: 'MOVE_TARGET' });
+    }
+    let active = true;
+    void Promise.all([...requests.entries()].map(async ([key, params]) => [key, await api(`/stock-documents/item-location-inventory?${new URLSearchParams(params)}`)] as const))
+      .then(rows => { if (active) setInventoryByKey(current => ({ ...current, ...Object.fromEntries(rows) })); })
+      .catch(fail);
+    return () => { active = false; };
+  }, [inbound, moving, outbound, watchedLines, watchedWarehouseId]);
   const save = async (values: any) => {
-    const lines = values.lines.map((line: any) => adjustment
+    const lines = values.lines.map(({ sourceKey, ...line }: any) => adjustment
       ? { ...line, adjustmentQty: String(line.adjustmentQty) }
       : { ...line, quantity: String(line.quantity) });
     try {
@@ -231,7 +300,7 @@ export function StockDocumentsV110Page({ type }: { type: StockType }) {
   const edit = async (record: any) => {
     try {
       const detail = await api(`/stock-documents/${record.id}`);
-      setEditing(detail); form.setFieldsValue({ warehouseId: detail.warehouseId, notes: detail.notes, lines: detail.lines.map((line: any) => ({ itemId: line.itemId, locationId: line.locationId, batchId: line.batchId, targetWarehouseId: line.targetWarehouseId, targetLocationId: line.targetLocationId, targetBatchId: line.targetBatchId, quantity: Number(line.quantity) })) }); setOpen(true);
+      setEditing(detail); form.setFieldsValue({ warehouseId: detail.warehouseId, notes: detail.notes, lines: detail.lines.map((line: any) => ({ itemId: line.itemId, locationId: line.locationId, batchId: line.batchId, sourceKey: `${line.locationId}:${line.batchId || ''}`, targetWarehouseId: line.targetWarehouseId, targetLocationId: line.targetLocationId, targetBatchId: line.targetBatchId, quantity: Number(line.quantity) })) }); setOpen(true);
     } catch (error) { fail(error); }
   };
   useEffect(() => {
@@ -254,19 +323,47 @@ export function StockDocumentsV110Page({ type }: { type: StockType }) {
     ]} />
     <Modal width={760} title={`${editing ? '编辑' : '新建'}${meta.title}单`} open={open} onCancel={() => setOpen(false)} onOk={() => form.submit()} destroyOnHidden>
       <Form form={form} layout="vertical" onFinish={save}>
-        <Form.Item label="仓库" name="warehouseId" rules={[{ required: true }]}><Select options={warehouses.filter(w => !meta.itemType || w.warehouseType === (meta.itemType === 'MATERIAL' ? 'RAW' : 'FG')).map(w => ({ value: w.id, label: `${w.warehouseCode} ${w.name}` }))} /></Form.Item>
+        <Form.Item label="仓库" name="warehouseId" rules={[{ required: true }]}><Select options={warehouses.filter(w => !meta.itemType || w.warehouseType === (meta.itemType === 'MATERIAL' ? 'RAW' : 'FG')).map(w => ({ value: w.id, label: `${w.warehouseCode} ${w.name}` }))} onChange={() => { setInventoryByKey({}); form.setFieldValue('lines', (form.getFieldValue('lines') || []).map(() => ({}))); }} /></Form.Item>
+        {(outbound || moving) && watchedWarehouseId && !sourceItemsLoading && !sourceItems.length && <Typography.Text type="warning">该仓库暂无可出库或移库的可用库存。</Typography.Text>}
         <Form.List name="lines">{(fields, { add, remove: removeLine }) => <>{fields.map(field => <Card size="small" key={field.key} style={{ marginBottom: 10 }}>
-          <Form.Item {...field} label="物料" name={[field.name, 'itemId']} rules={[{ required: true }]}><Select showSearch optionFilterProp="label" options={items.map(i => ({ value: i.id, label: `${i.itemCode} ${i.name}` }))} /></Form.Item>
+          <Form.Item {...field} label="物料" name={[field.name, 'itemId']} rules={[{ required: true }]}><Select showSearch optionFilterProp="label" loading={(outbound || moving) && sourceItemsLoading} disabled={(outbound || moving) && !watchedWarehouseId} notFoundContent={watchedWarehouseId ? '暂无可用库存物料' : '请先选择仓库'} options={((outbound || moving) ? sourceItems : items).map(i => ({ value: i.itemId || i.id, label: outbound || moving ? `${i.itemCode} ${i.name}｜可用 ${formatQuantity(i.availableQty)} ${i.unit}｜${i.locationCount} 个库位` : `${i.itemCode} ${i.name}` }))} onChange={(itemId) => form.setFieldValue(['lines', field.name], { itemId })} /></Form.Item>
           <Form.Item noStyle shouldUpdate>{({ getFieldValue }) => {
             const warehouseId = getFieldValue('warehouseId');
             const itemId = getFieldValue(['lines', field.name, 'itemId']);
-            return <Space align="start" wrap>
-              <Form.Item {...field} label="库位" name={[field.name, 'locationId']} rules={[{ required: true }]}><Select style={{ width: 210 }} options={locations.filter(l => l.warehouseId === warehouseId).map(l => ({ value: l.id, label: `${l.code} ${l.name}` }))} /></Form.Item>
-              <Form.Item {...field} label="批次（可选）" name={[field.name, 'batchId']}><Select allowClear style={{ width: 190 }} options={batches.filter(b => b.itemId === itemId).map(b => ({ value: b.id, label: b.batchNo }))} /></Form.Item>
-              {moving && <><Form.Item {...field} label="目标仓库" name={[field.name, 'targetWarehouseId']} rules={[{ required: true }]}><Select style={{ width: 190 }} options={warehouses.map(w => ({ value: w.id, label: `${w.warehouseCode} ${w.name}` }))} /></Form.Item><Form.Item {...field} label="目标库位" name={[field.name, 'targetLocationId']} rules={[{ required: true }]}><Select style={{ width: 190 }} options={locations.filter(l => l.warehouseId === getFieldValue(['lines', field.name, 'targetWarehouseId'])).map(l => ({ value: l.id, label: `${l.code} ${l.name}` }))} /></Form.Item><Form.Item {...field} label="目标批次（可选）" name={[field.name, 'targetBatchId']}><Select allowClear style={{ width: 190 }} options={batches.filter(b => b.itemId === itemId).map(b => ({ value: b.id, label: b.batchNo }))} /></Form.Item></>}
-              <Form.Item {...field} label={adjustment ? '调整数量（正增负减）' : '数量'} name={[field.name, adjustment ? 'adjustmentQty' : 'quantity']} rules={[{ required: true }]}><InputNumber precision={0} min={adjustment ? undefined : 1} style={{ width: 180 }} /></Form.Item>
-              {fields.length > 1 && <Button danger onClick={() => removeLine(field.name)}>删除行</Button>}
-            </Space>;
+            const sourcePurpose = moving ? 'MOVE_SOURCE' : outbound ? 'OUTBOUND' : 'INBOUND';
+            const source = itemId && warehouseId ? inventoryByKey[`${warehouseId}:${itemId}:${sourcePurpose}`] : undefined;
+            const targetWarehouseId = getFieldValue(['lines', field.name, 'targetWarehouseId']);
+            const target = moving && itemId && targetWarehouseId ? inventoryByKey[`${targetWarehouseId}:${itemId}:MOVE_TARGET`] : undefined;
+            const sourceBatches = (source?.locations || []).flatMap((location: any) => (location.batches || []).filter((batch: any) => Number(batch.availableQty) > 0).map((batch: any) => ({ ...batch, location })));
+            const sourceKey = getFieldValue(['lines', field.name, 'sourceKey']);
+            const selectedSourceBatch = sourceBatches.find((batch: any) => `${batch.location.locationId}:${batch.batchId || ''}` === sourceKey);
+            const sourceAvailableQty = selectedSourceBatch ? Number(selectedSourceBatch.availableQty) : undefined;
+            const sourceOptions = (outbound || moving)
+              ? sourceBatches.map((batch: any) => ({ value: `${batch.location.locationId}:${batch.batchId || ''}`, batchId: batch.batchId, locationId: batch.location.locationId, label: `${batch.location.zoneCode} / ${batch.location.locationCode}｜批次 ${batch.batchNo || '无'}｜可用 ${formatQuantity(batch.availableQty)}` }))
+              : inbound ? (source?.locations || []).map((location: any) => ({ value: location.locationId, disabled: location.isFull, label: `${location.zoneCode} / ${location.locationCode}｜现存 ${formatQuantity(location.onHandQty)}｜${location.capacityQty === null ? '不限量' : `剩余 ${formatQuantity(location.availableCapacityQty)}`}` }))
+                : locations.filter(location => location.warehouseId === warehouseId).map(location => ({ value: location.id, label: `${location.code} ${location.name}` }));
+            const targetOptions = (target?.locations || []).map((location: any) => ({ value: location.locationId, disabled: location.isFull, label: `${location.zoneCode} / ${location.locationCode}｜现存 ${formatQuantity(location.onHandQty)}｜${location.capacityQty === null ? '不限量' : `剩余 ${formatQuantity(location.availableCapacityQty)}`}` }));
+            const sourceWarehouse = warehouses.find(warehouse => warehouse.id === warehouseId);
+            const targetWarehouseOptions = warehouses.filter(warehouse => !sourceWarehouse || warehouse.warehouseType === sourceWarehouse.warehouseType).map(warehouse => ({ value: warehouse.id, label: `${warehouse.warehouseCode} ${warehouse.name}` }));
+            const displayed = (outbound || moving) ? sourceBatches : (source?.locations || []);
+            return <>
+              <Space align="start" wrap>
+                {(outbound || moving) ? <Form.Item {...field} label="来源库位 / 批次" name={[field.name, 'sourceKey']} rules={[{ required: true }]}><Select style={{ width: 310 }} options={sourceOptions} onChange={(_value, option: any) => { form.setFieldValue(['lines', field.name, 'locationId'], option?.locationId); form.setFieldValue(['lines', field.name, 'batchId'], option?.batchId); form.setFieldValue(['lines', field.name, 'quantity'], undefined); if (moving) form.setFieldValue(['lines', field.name, 'targetBatchId'], option?.batchId); }} /></Form.Item> : <><Form.Item {...field} label={inbound ? '入库库位' : '库位'} name={[field.name, 'locationId']} rules={[{ required: true }]}><Select style={{ width: 280 }} options={sourceOptions} /></Form.Item><Form.Item {...field} label="批次（可选）" name={[field.name, 'batchId']}><Select allowClear style={{ width: 180 }} options={batches.filter(b => b.itemId === itemId).map(b => ({ value: b.id, label: b.batchNo }))} /></Form.Item></>}
+                {moving && <><Form.Item {...field} label="目标仓库" name={[field.name, 'targetWarehouseId']} rules={[{ required: true }]}><Select style={{ width: 190 }} options={targetWarehouseOptions} onChange={() => { form.setFieldValue(['lines', field.name, 'targetLocationId'], undefined); form.setFieldValue(['lines', field.name, 'targetBatchId'], undefined); }} /></Form.Item><Form.Item {...field} label="目标库位" name={[field.name, 'targetLocationId']} rules={[{ required: true }]}><Select style={{ width: 280 }} options={targetOptions} /></Form.Item><Form.Item {...field} label="目标批次（可选）" name={[field.name, 'targetBatchId']}><Select allowClear style={{ width: 180 }} options={batches.filter(b => b.itemId === itemId).map(b => ({ value: b.id, label: b.batchNo }))} /></Form.Item></>}
+                <Form.Item {...field} label={adjustment ? '调整数量（正增负减）' : moving ? '移库数量' : inbound ? '入库数量' : '出库数量'} name={[field.name, adjustment ? 'adjustmentQty' : 'quantity']} rules={[{ required: true }, ...((outbound || moving) && sourceAvailableQty !== undefined ? [{ validator: (_rule: any, value: number | undefined) => value !== undefined && Number(value) > sourceAvailableQty ? Promise.reject(new Error(`数量不能超过可用库存 ${formatQuantity(sourceAvailableQty)}`)) : Promise.resolve() }] : [])]}><InputNumber precision={0} min={adjustment ? undefined : 1} max={(outbound || moving) ? sourceAvailableQty : undefined} style={{ width: 180 }} /></Form.Item>
+                {fields.length > 1 && <Button danger onClick={() => removeLine(field.name)}>删除行</Button>}
+              </Space>
+              {(inbound || outbound || moving) && itemId && <Table size="small" style={{ marginTop: 8 }} rowKey={(row: any) => row.batchId ? `${row.locationId}-${row.batchId}` : row.locationId} pagination={false} dataSource={displayed} columns={[
+                { title: '库区 / 库位', render: (_: any, row: any) => `${row.location?.zoneCode || row.zoneCode} / ${row.location?.locationCode || row.locationCode}` },
+                ...(outbound || moving ? [{ title: '批次', dataIndex: 'batchNo', render: (value: any) => value || '无' }] : []),
+                { title: '现存', dataIndex: 'onHandQty', align: 'right', render: formatQuantity },
+                { title: '冻结', dataIndex: 'frozenQty', align: 'right', render: formatQuantity },
+                { title: '已预占', dataIndex: 'reservedQty', align: 'right', render: formatQuantity },
+                { title: outbound || moving ? '可用数量' : '剩余容量', align: 'right', render: (_: any, row: any) => outbound || moving ? formatQuantity(row.availableQty) : row.capacityQty === null ? '不限量' : formatQuantity(row.availableCapacityQty) },
+              ]} />}
+              {(outbound || moving) && source && !sourceBatches.length && <Typography.Text type="warning">当前仓库没有该物料可用库存，请更换物料或仓库。</Typography.Text>}
+              {inbound && source && !(source.locations || []).some((location: any) => !location.isFull) && <Typography.Text type="warning">当前仓库没有可接收入库的库位，请先配置容量或调整库位容量。</Typography.Text>}
+            </>;
           }}</Form.Item>
         </Card>)}<Button block type="dashed" onClick={() => add()}>增加明细</Button></>}</Form.List>
         <Form.Item label="备注" name="notes"><Input.TextArea /></Form.Item>
@@ -422,11 +519,12 @@ export function RolesPage() {
 export function UsersV110Page() {
   const [data, setData] = useState<any>({ items: [] });
   const [roles, setRoles] = useState<any[]>([]);
+  const [editing, setEditing] = useState<any>();
   const [open, setOpen] = useState(false);
   const [form] = Form.useForm();
   const load = () => Promise.all([api('/users?pageSize=100'), api('/roles')]).then(([users, roleRows]) => { setData(users); setRoles(roleRows); }).catch(fail);
   useEffect(() => { void load(); }, []);
-  const save = async (values: any) => { try { await api('/users', { method: 'POST', body: JSON.stringify(values) }); message.success('账号已创建'); setOpen(false); load(); } catch (error) { fail(error); } };
+  const save = async (values: any) => { try { await api(editing ? `/users/${editing.id}` : '/users', { method: editing ? 'PATCH' : 'POST', body: JSON.stringify(values) }); message.success(editing ? '账号已更新' : '账号已创建'); setOpen(false); load(); } catch (error) { fail(error); } };
   const toggle = async (record: any) => { try { await api(`/users/${record.id}/status`, { method: 'PATCH', body: JSON.stringify({ status: record.status === 'ACTIVE' ? 'INACTIVE' : 'ACTIVE' }) }); message.success('账号状态已更新'); load(); } catch (error) { fail(error); } };
   const reset = (record: any) => {
     let password = '';
@@ -436,9 +534,18 @@ export function UsersV110Page() {
     } });
   };
   return <PageScaffold title="账号管理" subtitle="账号绑定动态角色；停用账号后，已签发 JWT 在下一次请求时立即失效。">
-    <div className="toolbar"><span /><Button type="primary" onClick={() => { form.resetFields(); setOpen(true); }}>新增账号</Button></div>
-    <Table rowKey="id" dataSource={data.items} columns={[{ title: '账号', dataIndex: 'username' }, { title: '姓名', dataIndex: 'name' }, { title: '角色', dataIndex: 'roleName' }, { title: '状态', dataIndex: 'status', render: value => <StatusTag value={value} /> }, { title: '操作', render: (_, record) => <Space><Button type="link" onClick={() => toggle(record)}>{record.status === 'ACTIVE' ? '停用' : '启用'}</Button><Button type="link" onClick={() => reset(record)}>重置密码</Button></Space> }]} />
-    <Modal title="新增账号" open={open} onCancel={() => setOpen(false)} onOk={() => form.submit()}><Form form={form} layout="vertical" onFinish={save}><Form.Item label="账号" name="username" rules={[{ required: true, message: '请输入账号' }, { max: 50, message: '账号不能超过 50 个字符' }]}><Input /></Form.Item><Form.Item label="姓名" name="employeeName" rules={[{ required: true, message: '请输入姓名' }, { max: 100, message: '姓名不能超过 100 个字符' }]}><Input /></Form.Item><Form.Item label="角色" name="roleId" rules={[{ required: true, message: '请选择角色' }]}><Select options={roles.filter(role => role.status === 'ACTIVE').map(role => ({ value: role.id, label: `${role.name} (${role.code})` }))} /></Form.Item><Form.Item label="初始密码" name="password" extra="至少 8 位字符" rules={[{ required: true, message: '请输入初始密码' }, { min: 8, message: '初始密码至少需要 8 位' }, { max: 100, message: '初始密码不能超过 100 位' }]}><Input.Password /></Form.Item></Form></Modal>
+    <div className="toolbar"><span /><Button type="primary" onClick={() => { setEditing(undefined); form.resetFields(); setOpen(true); }}>新增账号</Button></div>
+    <Table rowKey="id" dataSource={data.items} columns={[{ title: '账号', dataIndex: 'username' }, { title: '姓名', dataIndex: 'name' }, { title: '岗位', dataIndex: 'positionType' }, { title: '上级', dataIndex: 'managerName' }, { title: '角色', dataIndex: 'roleName' }, { title: '状态', dataIndex: 'status', render: value => <StatusTag value={value} /> }, { title: '操作', render: (_, record) => <Space><Button type="link" onClick={() => { setEditing(record); form.setFieldsValue(record); setOpen(true); }}>编辑</Button><Button type="link" onClick={() => toggle(record)}>{record.status === 'ACTIVE' ? '停用' : '启用'}</Button><Button type="link" onClick={() => reset(record)}>重置密码</Button></Space> }]} />
+    <Modal title={editing ? '编辑账号' : '新增账号'} open={open} onCancel={() => setOpen(false)} onOk={() => form.submit()}><Form form={form} layout="vertical" onFinish={save}>
+      <Form.Item label="账号" name="username" rules={[{ required: true }]}><Input disabled={!!editing} /></Form.Item>
+      <Form.Item label="姓名" name="employeeName" rules={[{ required: true }]}><Input /></Form.Item>
+      <Form.Item label="角色" name="roleId" rules={[{ required: true }]}><Select options={roles.filter(role => role.status === 'ACTIVE').map(role => ({ value: role.id, label: `${role.name} (${role.code})` }))} /></Form.Item>
+      <Form.Item label="岗位" name="positionType" rules={[{ required: true }]}><Select options={[{value:'PRODUCTION',label:'生产人员'},{value:'WAREHOUSE_MANAGER',label:'仓库管理员'},{value:'MANAGER',label:'管理人员'},{value:'SYSTEM_ADMIN',label:'系统管理员'}]} /></Form.Item>
+      <Form.Item label="部门" name="departmentName"><Input /></Form.Item>
+      <Form.Item noStyle shouldUpdate={(prev, next) => prev.positionType !== next.positionType}>{({ getFieldValue }) => <Form.Item label="上级审批人" name="managerUserId" rules={[{ required: ['PRODUCTION','WAREHOUSE_MANAGER'].includes(getFieldValue('positionType')), message: '生产人员和仓库管理员必须绑定上级审批人' }]}><Select allowClear options={(data.items || []).filter((row:any) => row.id !== editing?.id && row.status === 'ACTIVE' && row.canApprove && ['MANAGER','SYSTEM_ADMIN'].includes(row.positionType)).map((row:any) => ({value:row.id,label:`${row.name}（${row.positionType || row.roleName}）`}))} /></Form.Item>}</Form.Item>
+      <Form.Item label="具备审批权限" name="canApprove" valuePropName="checked"><Switch /></Form.Item>
+      {!editing && <Form.Item label="初始密码" name="password" rules={[{ required: true }, { min: 8 }]}><Input.Password /></Form.Item>}
+    </Form></Modal>
   </PageScaffold>;
 }
 
@@ -468,22 +575,21 @@ export function MaterialArchivePage() {
 
   const filtered = tab === 'ALL' ? data.items
     : tab === 'MATERIAL' ? data.items.filter((i: any) => i.itemType === 'MATERIAL')
-    : tab === 'SEMI_FINISHED' ? data.items.filter((i: any) => i.itemType === 'SEMI_FINISHED')
     : tab === 'FINISHED_GOOD' ? data.items.filter((i: any) => i.itemType === 'FINISHED_GOOD')
     : data.items.filter((i: any) => i.status === 'INACTIVE');
 
-  return <PageScaffold title="物料档案" subtitle="统一管理原材料、半成品和成品。物料分类和计量单位通过弹窗维护。">
+  return <PageScaffold title="物料档案" subtitle="统一管理原材料和成品。物料分类和计量单位通过弹窗维护。">
     <div className="toolbar"><div/>
       <Space>
         <Select defaultValue="ALL" style={{ width: 120 }} onChange={setTab}
-          options={[{value:'ALL',label:'全部'},{value:'MATERIAL',label:'原材料'},{value:'SEMI_FINISHED',label:'半成品'},{value:'FINISHED_GOOD',label:'成品'},{value:'INACTIVE',label:'已停用'}]} />
+          options={[{value:'ALL',label:'全部'},{value:'MATERIAL',label:'原材料'},{value:'FINISHED_GOOD',label:'成品'},{value:'INACTIVE',label:'已停用'}]} />
         <Button type="primary" icon={<PlusOutlined />} onClick={() => nav('/items')}>新增物料</Button>
       </Space>
     </div>
     <Table rowKey="id" dataSource={filtered} columns={[
       { title: '编码', dataIndex: 'itemCode' }, { title: '名称', dataIndex: 'name' },
       { title: '型号', dataIndex: 'model' }, { title: '规格', dataIndex: 'spec' },
-      { title: '分类', dataIndex: 'categoryName' }, { title: '类型', dataIndex: 'itemType', render: (v: string) => v === 'MATERIAL' ? '原材料' : v === 'SEMI_FINISHED' ? '半成品' : '成品' },
+      { title: '分类', dataIndex: 'categoryName' }, { title: '类型', dataIndex: 'itemType', render: (v: string) => v === 'MATERIAL' ? '原材料' : '成品' },
       { title: '单位', dataIndex: 'unitName' }, { title: '库存', dataIndex: 'onHandQty', align: 'right', render: formatQuantity },
       { title: '安全库存', dataIndex: 'minimumStock', align: 'right', render: formatQuantity },
       { title: '状态', dataIndex: 'status', render: (v: string) => <StatusTag value={v} /> },
@@ -497,12 +603,13 @@ export function MaterialArchivePage() {
 
 export function WarehouseArchivePage() {
   const [warehouses, setWarehouses] = useState<any[]>([]);
-  const load = () => api('/warehouses').then(setWarehouses).catch(fail);
+  const [users, setUsers] = useState<any[]>([]);
+  const load = () => Promise.all([api('/warehouses'),api('/users?pageSize=100')]).then(([rows,people])=>{setWarehouses(rows);setUsers(people.items||[]);}).catch(fail);
   useEffect(() => { void load(); }, []);
   const [editing, setEditing] = useState<any>();
   const [open, setOpen] = useState(false);
   const [form] = Form.useForm();
-  const save = async (values: any) => { try { await api(editing ? `/warehouses/${editing.id}` : '/warehouses', { method: editing ? 'PATCH' : 'POST', body: JSON.stringify(values) }); message.success('仓库已保存'); setOpen(false); load(); } catch (error) { fail(error); } };
+  const save = async (values: any) => { try { const row=await api(editing ? `/warehouses/${editing.id}` : '/warehouses', { method: editing ? 'PATCH' : 'POST', body: JSON.stringify(values) }); const id=editing?.id||row.id; await api(`/warehouses/${id}/managers`,{method:'PUT',body:JSON.stringify({userIds:values.managerIds||[]})}); message.success('仓库已保存'); setOpen(false); load(); } catch (error) { fail(error); } };
   const remove = async (id: string) => { try { await api(`/warehouses/${id}`, { method: 'DELETE' }); message.success('仓库已删除'); load(); } catch (error) { fail(error); } };
   return <PageScaffold title="仓储档案" subtitle="管理仓库、库区、货架和库位。">
     <div className="toolbar"><span /><Button type="primary" onClick={() => { setEditing(undefined); form.resetFields(); form.setFieldsValue({ warehouseType: 'RAW' }); setOpen(true); }}>新增仓库</Button></div>
@@ -520,6 +627,7 @@ export function WarehouseArchivePage() {
         <Form.Item label="名称" name="name" rules={[{ required: true }]}><Input /></Form.Item>
         {!editing && <Form.Item label="类型" name="warehouseType" rules={[{ required: true }]}><Select options={[{ value: 'RAW', label: '原材料库' }, { value: 'FG', label: '成品库' }]} /></Form.Item>}
         {editing && <Form.Item label="状态" name="status"><Select options={[{ value: 'ACTIVE', label: '启用' }, { value: 'INACTIVE', label: '停用' }]} /></Form.Item>}
+        <Form.Item label="仓库管理员" name="managerIds"><Select mode="multiple" options={users.filter(u=>u.positionType==='WAREHOUSE_MANAGER'&&u.status==='ACTIVE').map(u=>({value:u.id,label:`${u.name}（${u.username}）`}))} /></Form.Item>
       </Form>
     </Modal>
   </PageScaffold>;

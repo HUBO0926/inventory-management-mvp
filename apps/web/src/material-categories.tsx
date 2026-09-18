@@ -154,7 +154,7 @@ export function MaterialCategoriesPage({ user }: { user: User }) {
   return (
     <PageScaffold
       title="物料分类"
-      subtitle="分类按原材料、半成品和成品严格隔离；分类编码、名称、排序和状态均可维护。"
+      subtitle="分类按原材料和成品严格隔离；分类编码、名称、排序和状态均可维护。"
       extra={manageable ? <Button type="primary" icon={<PlusOutlined />} onClick={showCreate}>新增{typeLabels[itemType]}分类</Button> : undefined}
     >
       <Tabs

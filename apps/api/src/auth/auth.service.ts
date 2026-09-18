@@ -12,7 +12,8 @@ export class AuthService {
     const [row] = await this.db.query(
       `SELECT u.id,u.username,u.name,u.employee_name "employeeName",u.employee_no "employeeNo",
         u.department,u.position,u.password_hash,u.status,r.id role_id,r.code role,
-        COALESCE(array_agg(p.code) FILTER (WHERE p.code IS NOT NULL),'{}') permissions
+        COALESCE(array_agg(p.code) FILTER (WHERE p.code IS NOT NULL),'{}') permissions,
+        EXISTS(SELECT 1 FROM warehouse_manager wm WHERE wm.user_id=u.id) "isWarehouseManager"
        FROM users u JOIN roles r ON r.id=u.role_id
        LEFT JOIN role_permissions rp ON rp.role_id=r.id LEFT JOIN permissions p ON p.id=rp.permission_id
        WHERE u.username=$1 AND u.deleted_at IS NULL GROUP BY u.id,r.id`,
@@ -25,7 +26,7 @@ export class AuthService {
       id: row.id, username: row.username, name: row.name,
       employeeName: row.employeeName, employeeNo: row.employeeNo,
       department: row.department, position: row.position,
-      role: row.role, roleId: row.role_id, permissions: row.permissions,
+      role: row.role, roleId: row.role_id, permissions: row.permissions, isWarehouseManager: row.isWarehouseManager,
     };
 
     // Update last_login_at

@@ -1,7 +1,7 @@
 import { PickingOrdersService } from './picking-orders.service';
 
 describe('PickingOrdersService',()=>{
-  const service=new PickingOrdersService({} as any,{} as any,{} as any,{} as any,{} as any);
+  const service=new PickingOrdersService({} as any,{} as any,{} as any,{} as any,{} as any,{} as any);
   const shortage={materialId:'m1',itemCode:'M-001',requiredQty:'10.0000',pendingQty:'8.0000'};
 
   it('limits spare parts to ten percent of BOM demand',()=>{

@@ -235,7 +235,6 @@ export function MaterialListPage({ type, user }: { type: MaterialType; user: Use
 function getRequestedType(search: string): MaterialType {
   const value = new URLSearchParams(search).get('type');
   if (value === 'RAW_MATERIAL' || value === 'MATERIAL') return 'MATERIAL';
-  if (value === 'SEMI_FINISHED') return 'MATERIAL';
   if (value === 'FINISHED_GOOD') return 'FINISHED_GOOD';
   return 'MATERIAL';
 }

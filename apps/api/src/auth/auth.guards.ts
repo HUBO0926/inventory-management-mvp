@@ -34,7 +34,8 @@ export class PermissionsGuard {
     const required = this.reflector.getAllAndOverride<string[]>(PERMISSIONS_KEY, [context.getHandler(), context.getClass()]);
     if (!required?.length) return true;
     const user = context.switchToHttp().getRequest().user as AuthUser;
-    if (user?.role === Role.ADMIN || required.every(code => user?.permissions?.includes(code))) return true;
+    const managerBusinessPermissions = new Set(['stock.view','stock.create','stock.edit','stock.submit','stock.withdraw','stock.void','stock.move','stock.adjust','stock.count','inventory.view','inventory.export','inventory.report.view','warehouse.virtual.view','warehouse.capacity.view','warehouse.capacity.manage','warehouse.layout.edit']);
+    if (user?.role === Role.ADMIN || required.every(code => user?.permissions?.includes(code)) || (user?.isWarehouseManager && required.every(code => managerBusinessPermissions.has(code)))) return true;
     throw new BusinessException('FORBIDDEN', '无权执行此操作', HttpStatus.FORBIDDEN);
   }
 }

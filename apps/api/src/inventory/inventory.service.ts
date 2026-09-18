@@ -2,18 +2,21 @@ import { HttpStatus, Injectable } from '@nestjs/common';
 import Decimal from 'decimal.js';
 import { DataSource } from 'typeorm';
 import { BusinessException } from '../common/business.exception';
+import { AuthUser } from '../common/constants';
 import { parsePage } from '../common/validation';
+import { WarehouseAccessService } from '../warehouses/warehouse-access.service';
 
 @Injectable()
 export class InventoryService {
-  constructor(private readonly db: DataSource) {}
+  constructor(private readonly db: DataSource, private readonly warehouseAccess: WarehouseAccessService) {}
 
-  async balances(q: any) {
+  async balances(q: any, user?: AuthUser) {
     const page = parsePage(q.page, 1);
     const pageSize = parsePage(q.pageSize, 20, 100);
     const offset = (page - 1) * pageSize;
     const params: any[] = [];
     const where = this.balanceFilters(q, params);
+    await this.appendWarehouseScope(where, params, 'sb', user);
     const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
     const [{ count }] = await this.db.query(
       `SELECT count(*)::int count
@@ -51,7 +54,7 @@ export class InventoryService {
     return { items, total: count, page, pageSize };
   }
 
-  async transactions(q: any) {
+  async transactions(q: any, user?: AuthUser) {
     const page = parsePage(q.page, 1);
     const pageSize = parsePage(q.pageSize, 20, 100);
     const offset = (page - 1) * pageSize;
@@ -88,6 +91,7 @@ export class InventoryService {
       params.push(`%${q.keyword}%`);
       where.push(`(i.item_code ILIKE $${params.length} OR i.name ILIKE $${params.length} OR d.document_no ILIKE $${params.length})`);
     }
+    await this.appendWarehouseScope(where, params, 't', user);
     const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
     const [{ count }] = await this.db.query(
       `SELECT count(*)::int count FROM stock_transactions t
@@ -125,8 +129,8 @@ export class InventoryService {
     return { items, total: count, page, pageSize };
   }
 
-  async transaction(id: string) {
-    const result = await this.transactions({ transactionNo:id, page:1, pageSize:1 });
+  async transaction(id: string, user?: AuthUser) {
+    const result = await this.transactions({ transactionNo:id, page:1, pageSize:1 }, user);
     if (!result.items.length) throw new BusinessException('NOT_FOUND', '库存流水不存在', HttpStatus.NOT_FOUND);
     return result.items[0];
   }
@@ -157,11 +161,11 @@ export class InventoryService {
     return { consistent: differences.length === 0, checkedAt: new Date().toISOString(), differences };
   }
 
-  async exportCsv(q: any) {
-    const result = await this.balances({ ...q, page: 1, pageSize: 100 });
+  async exportCsv(q: any, user?: AuthUser) {
+    const result = await this.balances({ ...q, page: 1, pageSize: 100 }, user);
     const all = [...result.items];
     for (let page = 2; page <= Math.ceil(result.total / 100); page++) {
-      const next = await this.balances({ ...q, page, pageSize: 100 });
+      const next = await this.balances({ ...q, page, pageSize: 100 }, user);
       all.push(...next.items);
     }
     const header = ['仓库', '库区', '库位', '物料编码', '物料名称', '单位', '批次', '当前库存', '安全库存'];
@@ -190,5 +194,12 @@ export class InventoryService {
     add(q.batchId, 'sb.batch_id=?');
     add(q.itemType, 'i.item_type=?');
     return where;
+  }
+
+  private async appendWarehouseScope(where: string[], params: any[], alias: string, user?: AuthUser) {
+    const ids = await this.warehouseAccess.managedWarehouseIds(user);
+    if (ids === null) return;
+    params.push(ids);
+    where.push(`${alias}.warehouse_id=ANY($${params.length}::uuid[])`);
   }
 }

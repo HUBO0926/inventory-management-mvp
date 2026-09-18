@@ -10,6 +10,11 @@
     "test:e2e": "jest --config test/jest-e2e.json --runInBand",
     "migration:run": "ts-node -r tsconfig-paths/register src/database/run-migrations.ts",
     "seed": "ts-node -r tsconfig-paths/register src/database/seed.ts",
+    "seed:demo-inventory": "ts-node -r tsconfig-paths/register src/database/seed-demo-inventory.ts",
+    "seed:functional-warehouse": "ts-node -r tsconfig-paths/register src/database/seed-functional-warehouse.ts",
+    "test:functional-warehouse": "ts-node -r tsconfig-paths/register src/database/run-functional-warehouse-tests.ts",
+    "test:seed-bom-selector": "ts-node -r tsconfig-paths/register src/database/seed-bom-selector-test.ts",
+    "test:cleanup-bom-selector": "ts-node -r tsconfig-paths/register src/database/cleanup-bom-selector-test.ts",
     "inventory:reconcile": "ts-node -r tsconfig-paths/register src/database/reconcile-inventory.ts",
     "test:upgrade": "ts-node -r tsconfig-paths/register test/upgrade-migration.ts"
   },

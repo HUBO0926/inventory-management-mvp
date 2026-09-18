@@ -2,7 +2,7 @@
 
 一个基于 React、NestJS 和 PostgreSQL 的模块化单体库存系统，跑通原材料入库、生产任务、领退料、分次报产、独立成品入库、成品出库、库存余额和不可修改流水的完整闭环。
 
-当前开发版本为 **V1.3.1（账号创建兼容性修复）**。修复账号管理页面姓名字段与后端参数不一致导致无法新增账号的问题，并兼容旧客户端请求。V1.3 系列包含审核中心入库分配、不良品处理、整数数量迁移、库存单据打印及库存生产一体化驾驶舱；升级前请阅读 [库存审核与不良品处理升级说明](docs/inventory-approval-defective-upgrade.md)。
+当前开发版本为 **V1.7.0**。系统仅保留“原材料 → 成品”业务链路，仓储档案支持多仓库管理员及其仓库范围权限，并提供可重复执行的演示库存生成命令。
 
 ## 核心约束
 
@@ -72,7 +72,7 @@ cd inventory-management-mvp
 cp .env.1panel.example .env
 ```
 
-2. 在 1Panel 文件管理器或终端编辑 `.env`。设置 `APP_VERSION=1.3.1`，并将 `POSTGRES_PASSWORD`、`JWT_SECRET` 和 `INITIAL_DEMO_PASSWORD` 替换为新的强密码；`.env` 不得提交到 Git。
+2. 在 1Panel 文件管理器或终端编辑 `.env`。设置 `APP_VERSION=1.7.0`，并将 `POSTGRES_PASSWORD`、`JWT_SECRET` 和 `INITIAL_DEMO_PASSWORD` 替换为新的强密码；`.env` 不得提交到 Git。
 3. 打开“容器 → Compose”，选择项目目录和 `docker-compose.1panel.yml`，拉取固定版本 GHCR 镜像并启动。此编排不暴露 PostgreSQL 和 API，只将 Web 绑定到 `127.0.0.1:${WEB_PORT:-8080}`。
 4. 打开“网站”，新建反向代理网站，将目标设为 `http://127.0.0.1:8080`。随后申请 Let’s Encrypt 证书并开启强制 HTTPS。公网安全组只需开放 80/443。
 5. 访问 `https://你的域名/api/health` 检查 API，再使用三个演示账号和 `INITIAL_DEMO_PASSWORD` 登录。首次验证后，管理员应立即在“账号管理”中为三个账号分别设置新密码。
@@ -93,7 +93,7 @@ docker compose -f docker-compose.1panel.yml pull
 docker compose -f docker-compose.1panel.yml up -d
 ```
 
-升级前通过 1Panel 备份 `inventory_1panel_postgres` 数据卷。涉及数据库迁移的版本回滚必须先恢复升级前备份，再将 `APP_VERSION` 切回已核验的 `1.0.0` 镜像；不要只回滚应用镜像。
+升级前通过 1Panel 备份 `inventory_1panel_postgres` 数据卷。涉及数据库迁移的版本回滚必须先恢复升级前备份，再将 `APP_VERSION` 切回已核验的上一版本镜像；不要只回滚应用镜像。
 
 ## 公网 HTTPS 与手机访问
 

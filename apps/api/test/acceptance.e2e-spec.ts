@@ -47,6 +47,9 @@ describe('库存管理固定验收场景',()=>{
   });
 
   it('连续执行物料/BOM至出库、幂等、负库存和对账',async()=>{
+    await request(app.getHttpServer()).post('/api/items').set(auth(admin)).send({
+      itemCode:'LEGACY-SEMI',name:'不应创建的半成品',itemType:'SEMI_FINISHED',unit:'个',
+    }).expect(400);
     for(const item of [
       {itemCode:'M-001',name:'电机',itemType:'MATERIAL',unit:'个'},
       {itemCode:'M-002',name:'外壳',itemType:'MATERIAL',unit:'个'},
@@ -299,7 +302,7 @@ describe('库存管理固定验收场景',()=>{
 
   it('V1.1.0 主数据、动态角色、审批状态和库存调整可完整运行',async()=>{
     const version=await request(app.getHttpServer()).get('/api/system/version').expect(200);
-    expect(version.body.data.version).toBe('1.3.1');
+    expect(version.body.data.version).toBe('1.7.0');
 
     const [adminRole]=await db.query(`SELECT id FROM roles WHERE code='ADMIN'`);
     const legacyUser=await request(app.getHttpServer()).post('/api/users').set(auth(admin)).send({
@@ -487,10 +490,13 @@ describe('库存管理固定验收场景',()=>{
     expect(deletedWarehouse.body.data.deletionMode).toBe('HARD');
   });
 
-  it('管理员可设置自定义重置密码，旧密码立即失效', async () => {
+  it('管理员重置后的密码在再次运行生产种子后仍保持有效', async () => {
     const users = await request(app.getHttpServer()).get('/api/users?pageSize=100').set(auth(admin)).expect(200);
     const target = users.body.data.items.find((user: any) => user.username === 'production');
     await request(app.getHttpServer()).post(`/api/users/${target.id}/reset-password`).set(auth(admin)).send({ password: 'NewDemo@2026' }).expect(201);
+    await request(app.getHttpServer()).post('/api/auth/login').send({ username: 'production', password: 'Demo@123456' }).expect(401);
+    await request(app.getHttpServer()).post('/api/auth/login').send({ username: 'production', password: 'NewDemo@2026' }).expect(201);
+    await seedDatabase(db, false);
     await request(app.getHttpServer()).post('/api/auth/login').send({ username: 'production', password: 'Demo@123456' }).expect(401);
     await request(app.getHttpServer()).post('/api/auth/login').send({ username: 'production', password: 'NewDemo@2026' }).expect(201);
   });

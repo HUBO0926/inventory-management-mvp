@@ -375,7 +375,6 @@ export class ItemsService {
       throw new BusinessException('VALIDATION_ERROR', 'itemType 与 type 参数不一致');
     }
     const resolved = query.itemType || alias;
-    if (resolved === ItemType.SEMI_FINISHED) throw new BusinessException('VALIDATION_ERROR', '系统已下线半成品，不支持该物料类型');
     return resolved;
   }
 
@@ -400,7 +399,6 @@ export class ItemsService {
     };
     merge('itemCode', 'code', value => String(value).trim().toUpperCase());
     merge('itemType', 'type', value => this.normalizeType(String(value)));
-    if (dto.itemType === ItemType.SEMI_FINISHED) throw new BusinessException('VALIDATION_ERROR', '系统已下线半成品，不支持该物料类型');
     merge('spec', 'specification', value => value === null ? null : String(value).trim());
     merge('minimumStock', 'safetyStock', value => String(value));
     merge('status', 'enabled', value => typeof value === 'boolean'
@@ -543,18 +541,11 @@ export class ItemsService {
         [id],
       ),
     ]);
-    let allowedTypes = [ItemType.MATERIAL, ItemType.SEMI_FINISHED, ItemType.FINISHED_GOOD];
+    let allowedTypes = [ItemType.MATERIAL, ItemType.FINISHED_GOOD];
     const reasons: string[] = [];
-    if (roles.asOutput && roles.asComponent) {
-      allowedTypes = [ItemType.SEMI_FINISHED];
-      reasons.push('该物料同时作为 BOM 产出物料和组成物料，只能设置为半成品');
-    } else if (roles.asOutput) {
-      allowedTypes = [ItemType.SEMI_FINISHED, ItemType.FINISHED_GOOD];
-      reasons.push('该物料作为 BOM 或生产任务的产出物料，只能设置为半成品或成品');
-    } else if (roles.asComponent) {
-      allowedTypes = [ItemType.MATERIAL, ItemType.SEMI_FINISHED];
-      reasons.push('该物料作为 BOM 或生产任务的组成物料，只能设置为原材料或半成品');
-    }
+    if (roles.asOutput && roles.asComponent) throw new BusinessException('ITEM_TYPE_CONFLICT', '物料不能同时作为产出成品和组成原材料');
+    if (roles.asOutput) { allowedTypes = [ItemType.FINISHED_GOOD]; reasons.push('作为 BOM 或生产任务产出时必须保持成品类型'); }
+    if (roles.asComponent) { allowedTypes = [ItemType.MATERIAL]; reasons.push('作为 BOM 组成物料时必须保持原材料类型'); }
     return { allowedTypes, reasons, stock };
   }
 

@@ -10,9 +10,9 @@ describe('seedDatabase', () => {
     else process.env.INITIAL_DEMO_PASSWORD = originalPassword;
   });
 
-  it('uses the configured initial password without overwriting existing password hashes', async () => {
+  it('uses the configured initial password only when creating default accounts', async () => {
     process.env.INITIAL_DEMO_PASSWORD = 'Custom@123456';
-    const query = jest.fn().mockResolvedValue([]);
+    const query = jest.fn().mockImplementation((sql: string) => sql.includes("SELECT id FROM users WHERE username='admin'") ? Promise.resolve([{ id: 'admin-id' }]) : Promise.resolve([]));
 
     await seedDatabase({ query } as unknown as DataSource, false);
 
@@ -20,8 +20,8 @@ describe('seedDatabase', () => {
     expect(userInserts).toHaveLength(3);
     for (const [sql, parameters] of userInserts) {
       expect(await bcrypt.compare('Custom@123456', parameters[2])).toBe(true);
-      expect(sql).toContain('ON CONFLICT(username) DO UPDATE');
-      expect(sql.split('DO UPDATE')[1]).not.toContain('password_hash');
+      expect(sql).toContain('ON CONFLICT(username) DO NOTHING');
+      expect(sql).not.toContain('DO UPDATE');
     }
   });
 

@@ -11,11 +11,24 @@ export async function seedDatabase(db: DataSource, includeMasterData = true) {
     ['warehouse', '仓库管理员', 'WAREHOUSE'],
     ['production', '生产人员', 'PRODUCTION'],
   ];
+  const createdUsers = new Set<string>();
   for (const [username, name, role] of users) {
-    await db.query(`INSERT INTO users(username,name,password_hash,role,role_id,employee_name)
+    const created = await db.query(`INSERT INTO users(username,name,password_hash,role,role_id,employee_name)
       SELECT $1,$2,$3,$4,id,$2 FROM roles WHERE code=$5
-      ON CONFLICT(username) DO UPDATE SET name=EXCLUDED.name,role=EXCLUDED.role,role_id=EXCLUDED.role_id,employee_name=EXCLUDED.employee_name`,
+      ON CONFLICT(username) DO NOTHING
+      RETURNING username`,
       [username, name, passwordHash, role, role]);
+    if (created[0]?.username) createdUsers.add(created[0].username);
+  }
+  const [admin] = await db.query(`SELECT id FROM users WHERE username='admin'`);
+  if (createdUsers.has('admin')) {
+    await db.query(`UPDATE users SET position_type='SYSTEM_ADMIN',can_approve=true,department_name='系统管理部' WHERE username='admin'`);
+  }
+  if (createdUsers.has('warehouse')) {
+    await db.query(`UPDATE users SET position_type='WAREHOUSE_MANAGER',manager_user_id=$1,department_name='仓储部',can_approve=false WHERE username='warehouse'`, [admin.id]);
+  }
+  if (createdUsers.has('production')) {
+    await db.query(`UPDATE users SET position_type='PRODUCTION',manager_user_id=$1,department_name='生产部',can_approve=false WHERE username='production'`, [admin.id]);
   }
 
   if (await shouldInitialize(db, 'base_warehouses_v1', 'warehouses')) {
@@ -46,6 +59,9 @@ export async function seedDatabase(db: DataSource, includeMasterData = true) {
     JOIN warehouse_zones z ON z.warehouse_id=w.id AND z.sequence_no=1
     WHERE w.warehouse_code='DEFECTIVE'
     ON CONFLICT(warehouse_id,code) DO NOTHING`);
+  await db.query(`INSERT INTO warehouse_manager(warehouse_id,user_id,created_by)
+    SELECT w.id,u.id,$1 FROM warehouses w JOIN users u ON u.username='warehouse' WHERE w.warehouse_code IN ('RAW','FG','DEFECTIVE')
+    ON CONFLICT(warehouse_id,user_id) DO NOTHING`, [admin.id]);
   if (!includeMasterData) return;
 
   if (await shouldInitialize(db, 'demo_master_data_v1', 'items')) {

@@ -2,7 +2,9 @@ import { HttpStatus, Injectable } from '@nestjs/common';
 import { Workbook } from 'exceljs';
 import { DataSource } from 'typeorm';
 import { BusinessException } from '../common/business.exception';
+import { AuthUser } from '../common/constants';
 import { parsePage } from '../common/validation';
+import { WarehouseAccessService } from '../warehouses/warehouse-access.service';
 
 type ReportDefinition = {
   sql: string;
@@ -25,10 +27,11 @@ const REPORT_NAMES: Record<string, string> = {
 
 @Injectable()
 export class InventoryReportService {
-  constructor(private readonly db: DataSource) {}
+  constructor(private readonly db: DataSource, private readonly warehouseAccess: WarehouseAccessService) {}
 
-  async report(type: string, q: any) {
-    const definition = this.definition(type, q);
+  async report(type: string, q: any, user?: AuthUser) {
+    const scopedQuery = await this.withWarehouseScope(q, user);
+    const definition = this.definition(type, scopedQuery);
     const page = parsePage(q.page, 1);
     const pageSize = parsePage(q.pageSize, 20, 100);
     const offset = (page - 1) * pageSize;
@@ -63,11 +66,11 @@ export class InventoryReportService {
     };
   }
 
-  async export(type: string, q: any) {
-    const first = await this.report(type, { ...q, page: 1, pageSize: 100 });
+  async export(type: string, q: any, user?: AuthUser) {
+    const first = await this.report(type, { ...q, page: 1, pageSize: 100 }, user);
     const items = [...first.items];
     for (let page = 2; page <= Math.ceil(first.total / 100); page += 1) {
-      const next = await this.report(type, { ...q, page, pageSize: 100 });
+      const next = await this.report(type, { ...q, page, pageSize: 100 }, user);
       items.push(...next.items);
     }
     const workbook = new Workbook();
@@ -87,6 +90,13 @@ export class InventoryReportService {
     return REPORT_NAMES[type];
   }
 
+  private async withWarehouseScope(q: any, user?: AuthUser) {
+    const warehouseIds = await this.warehouseAccess.managedWarehouseIds(user);
+    if (warehouseIds === null) return q;
+    if (q.warehouseId) await this.warehouseAccess.assertWarehouse(user, q.warehouseId);
+    return { ...q, managedWarehouseIds: warehouseIds };
+  }
+
   private definition(type: string, q: any): ReportDefinition {
     this.name(type);
     const params: any[] = [];
@@ -97,6 +107,10 @@ export class InventoryReportService {
       where.push(expression.replaceAll('?', `$${params.length}`));
     };
     add(q.warehouseId, 'w.id=?');
+    if (Array.isArray(q.managedWarehouseIds)) {
+      params.push(q.managedWarehouseIds);
+      where.push(`w.id=ANY($${params.length}::uuid[])`);
+    }
     add(q.itemId, 'i.id=?');
     if (q.keyword) {
       params.push(`%${q.keyword}%`);

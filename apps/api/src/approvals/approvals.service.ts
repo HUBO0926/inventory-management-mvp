@@ -22,16 +22,20 @@ export class ApprovalsService {
   }
   private scopeMatch(doc:any, scopes:Scope[]) { return scopes.some(s => (!s.document_type || s.document_type===doc.document_type) && (!s.warehouse_id || s.warehouse_id===doc.warehouse_id)); }
   private async requireAction(id:string,user:AuthUser, action:'approve'|'reject') {
+    if (!await this.taskAllowed(id,user)) throw new BusinessException('FORBIDDEN','当前账号不是该审批任务的指定审批人',HttpStatus.FORBIDDEN);
     const [doc] = await this.db.query(`SELECT id,document_type,warehouse_id,created_by,status FROM stock_documents WHERE id=$1`,[id]);
     if (!doc) throw new BusinessException('NOT_FOUND','审核单据不存在');
     if (doc.status !== 'SUBMITTED') throw new BusinessException('INVALID_STATUS','只有待审核单据可以处理');
-    const scopes=await this.scopes(user); if (!this.scopeMatch(doc,scopes)) throw new BusinessException('FORBIDDEN','当前角色没有该单据的审核范围',HttpStatus.FORBIDDEN);
-    if (doc.created_by===user.id && !scopes.some(s => (!s.document_type||s.document_type===doc.document_type)&&(!s.warehouse_id||s.warehouse_id===doc.warehouse_id)&&s.allow_self_approval)) throw new BusinessException('FORBIDDEN','不能审核自己提交的单据',HttpStatus.FORBIDDEN);
+    if (doc.created_by===user.id) throw new BusinessException('FORBIDDEN','不能审核自己提交的单据',HttpStatus.FORBIDDEN);
     return doc;
+  }
+  private async taskAllowed(id:string,user:AuthUser) {
+    const [task] = await this.db.query(`SELECT 1 FROM approval_task t JOIN approval_instance a ON a.id=t.approval_instance_id WHERE a.document_id=$1 AND t.approver_user_id=$2 AND t.status='PENDING'`, [id,user.id]);
+    return Boolean(task);
   }
   private async viewWhere(user:AuthUser, params:any[], alias='d') {
     const own = user.role !== Role.ADMIN && !user.permissions?.includes('approval.view-all');
-    if (own) { params.push(user.id); return `${alias}.created_by=$${params.length}`; }
+    if (own) { params.push(user.id); return `(${alias}.created_by=$${params.length} OR EXISTS(SELECT 1 FROM approval_task at JOIN approval_instance ai ON ai.id=at.approval_instance_id WHERE ai.document_id=${alias}.id AND at.approver_user_id=$${params.length}) OR EXISTS(SELECT 1 FROM approval_instance ai WHERE ai.document_id=${alias}.id AND ai.applicant_user_id=$${params.length}))`; }
     const scopes=await this.scopes(user); if (user.role===Role.ADMIN) return 'TRUE'; if (!scopes.length) return 'FALSE';
     const checks:string[]=[]; for (const s of scopes) { const p:string[]=[]; if(s.document_type){params.push(s.document_type);p.push(`${alias}.document_type=$${params.length}`)} if(s.warehouse_id){params.push(s.warehouse_id);p.push(`${alias}.warehouse_id=$${params.length}`)} checks.push(p.length?p.join(' AND '):'TRUE'); } return `(${checks.join(' OR ')})`;
   }
@@ -54,16 +58,19 @@ export class ApprovalsService {
     const add=(sql:string,v:any)=>{params.push(v);where.push(sql.replace('$?',`$${params.length}`));};
     const tab=query.tab||'pendingMine';
     const canSelf=(await this.scopes(user)).some(s=>s.allow_self_approval);
-    if(tab==='pendingMine'){ add(`d.status=$?`,'SUBMITTED'); if(!canSelf) add(`d.created_by<>$?`,user.id); }
-    else if(tab==='pendingAll') add(`d.status=$?`,'SUBMITTED');
-    else if(tab==='submitted') add(`d.created_by=$?`,user.id);
-    else if(tab==='approved') { add(`d.approved_by=$?`,user.id); where.push(`d.status IN ('POSTED','VOIDED')`); }
+    if(tab==='pendingMine'){ add(`d.status=$?`,'SUBMITTED'); where.push(`EXISTS(SELECT 1 FROM approval_task at JOIN approval_instance ai ON ai.id=at.approval_instance_id WHERE ai.document_id=d.id AND at.approver_user_id=$${params.length+1} AND at.status='PENDING')`); params.push(user.id); }
+    else if(tab==='pendingAll' || tab==='all') {
+      if (user.role!==Role.ADMIN && !user.permissions?.includes('approval.view-all')) throw new BusinessException('FORBIDDEN','无权查看全部审批',HttpStatus.FORBIDDEN);
+      if(tab==='pendingAll') add(`d.status=$?`,'SUBMITTED');
+    }
+    else if(tab==='submitted') { where.push(`EXISTS(SELECT 1 FROM approval_instance ai WHERE ai.document_id=d.id AND ai.applicant_user_id=$${params.length+1})`); params.push(user.id); }
+    else if(tab==='approved') { where.push(`EXISTS(SELECT 1 FROM approval_task at JOIN approval_instance ai ON ai.id=at.approval_instance_id WHERE ai.document_id=d.id AND at.approver_user_id=$${params.length+1} AND at.status IN ('APPROVED','REJECTED','RETURNED','TRANSFERRED'))`); params.push(user.id); }
     else if(tab==='rejected') add(`d.status=$?`,'REJECTED');
     if(query.status) add(`d.status=$?`,query.status); if(query.documentType) add(`d.document_type=$?`,query.documentType); if(query.warehouseId) add(`d.warehouse_id=$?`,query.warehouseId);
     if(query.keyword){params.push(`%${query.keyword}%`);where.push(`(d.document_no ILIKE $${params.length} OR EXISTS(SELECT 1 FROM stock_document_lines sl JOIN items i ON i.id=sl.item_id WHERE sl.document_id=d.id AND (i.item_code ILIKE $${params.length} OR i.name ILIKE $${params.length})))`);}
     if(query.overdue==='true') where.push(`d.status='SUBMITTED' AND d.submitted_at<now()-interval '24 hours'`);
     const clause=`WHERE ${where.filter(Boolean).join(' AND ')}`; const [{count}]=await this.db.query(`SELECT count(*)::int count FROM stock_documents d ${clause}`,params);
-    params.push(pageSize,(page-1)*pageSize); const items=await this.db.query(`SELECT d.id,d.document_no "documentNo",d.document_type "documentType",d.status,d.notes,w.warehouse_code "warehouseCode",w.name "warehouseName",COALESCE(d.submitted_by_name,u.name,u.username) "submitterName",d.created_by "createdById",COALESCE(d.approved_by_name,au.name,au.username) "approverName",d.submitted_at "submittedAt",d.approved_at "approvedAt",d.rejected_at "rejectedAt",d.rejection_reason "rejectionReason",count(l.id)::int "lineCount",floor(extract(epoch FROM (now()-d.submitted_at))/60)::int "waitingMinutes" FROM stock_documents d JOIN warehouses w ON w.id=d.warehouse_id LEFT JOIN users u ON u.id=d.created_by LEFT JOIN users au ON au.id=d.approved_by LEFT JOIN stock_document_lines l ON l.document_id=d.id ${clause} GROUP BY d.id,w.warehouse_code,w.name,u.name,u.username,au.name,au.username ORDER BY COALESCE(d.submitted_at,d.created_at) DESC LIMIT $${params.length-1} OFFSET $${params.length}`,params);
+    params.push(pageSize,(page-1)*pageSize); const items=await this.db.query(`SELECT d.id,d.document_no "documentNo",d.document_type "documentType",d.status,d.notes,w.warehouse_code "warehouseCode",w.name "warehouseName",COALESCE(d.submitted_by_name,u.name,u.username) "submitterName",d.created_by "createdById",COALESCE(d.approved_by_name,au.name,au.username) "approverName",d.submitted_at "submittedAt",d.approved_at "approvedAt",d.rejected_at "rejectedAt",d.rejection_reason "rejectionReason",GREATEST(count(l.id)::int,(SELECT count(*)::int FROM stock_check_lines c WHERE c.document_id=d.id)) "lineCount",floor(extract(epoch FROM (now()-d.submitted_at))/60)::int "waitingMinutes" FROM stock_documents d JOIN warehouses w ON w.id=d.warehouse_id LEFT JOIN users u ON u.id=d.created_by LEFT JOIN users au ON au.id=d.approved_by LEFT JOIN stock_document_lines l ON l.document_id=d.id ${clause} GROUP BY d.id,w.warehouse_code,w.name,u.name,u.username,au.name,au.username ORDER BY COALESCE(d.submitted_at,d.created_at) DESC LIMIT $${params.length-1} OFFSET $${params.length}`,params);
     return {items,total:count,page,pageSize};
   }
   async detail(id:string,user:AuthUser) {
@@ -82,6 +89,30 @@ export class ApprovalsService {
     return detail;
   }
   async history(id:string,user:AuthUser) { await this.detail(id,user); return this.db.query(`SELECT id,action,status_before "statusBefore",status_after "statusAfter",actor_username "actorUsername",actor_name "actorName",reason_code "reasonCode",reason,request_id "requestId",ip,source,created_at "createdAt" FROM approval_records WHERE document_id=$1 ORDER BY created_at DESC`,[id]); }
+
+  async revoke(id:string,user:AuthUser) {
+    const [row] = await this.db.query(`SELECT d.status,ai.applicant_user_id FROM stock_documents d LEFT JOIN approval_instance ai ON ai.document_id=d.id WHERE d.id=$1`, [id]);
+    if (!row || row.applicant_user_id !== user.id) throw new BusinessException('FORBIDDEN','只有发起人可以撤回审批',HttpStatus.FORBIDDEN);
+    if (row.status !== 'SUBMITTED') throw new BusinessException('INVALID_STATUS','只有待审批单据可以撤回');
+    return this.stock.withdraw(id,user,{reason:'发起人撤回审批'});
+  }
+
+  async transfer(id:string,newApproverId:string,user:AuthUser) {
+    if (!newApproverId) throw new BusinessException('VALIDATION_ERROR','请选择新的审批人');
+    const qr=this.db.createQueryRunner(); await qr.connect(); await qr.startTransaction();
+    try {
+      const [row]=await qr.query(`SELECT t.id,t.approval_instance_id,a.applicant_user_id,d.document_no,d.document_type FROM approval_task t JOIN approval_instance a ON a.id=t.approval_instance_id JOIN stock_documents d ON d.id=a.document_id WHERE d.id=$1 AND t.approver_user_id=$2 AND t.status='PENDING' FOR UPDATE`,[id,user.id]);
+      if(!row) throw new BusinessException('FORBIDDEN','当前账号不是该审批任务的审批人',HttpStatus.FORBIDDEN);
+      if (newApproverId===user.id || newApproverId===row.applicant_user_id) throw new BusinessException('VALIDATION_ERROR','不能转交给当前审批人或发起人');
+      const [next]=await qr.query(`SELECT id,name FROM users WHERE id=$1 AND status='ACTIVE' AND deleted_at IS NULL AND can_approve=true AND position_type IN ('MANAGER','SYSTEM_ADMIN')`,[newApproverId]);
+      if(!next) throw new BusinessException('VALIDATION_ERROR','新的审批人无效');
+      await qr.query(`UPDATE approval_task SET status='TRANSFERRED',approved_at=now() WHERE id=$1`,[row.id]);
+      await qr.query(`INSERT INTO approval_task(approval_instance_id,approver_user_id,approver_name,status) VALUES($1,$2,$3,'PENDING') ON CONFLICT(approval_instance_id,approver_user_id) DO UPDATE SET status='PENDING',approved_at=NULL`,[row.approval_instance_id,newApproverId,next.name]);
+      await qr.query(`INSERT INTO notification(receiver_user_id,type,title,content,business_type,business_id) VALUES($1,'APPROVAL_TRANSFERRED','审批已转交',$2,$3,$4),($5,'APPROVAL_TRANSFERRED','审批已转交',$6,$3,$4)`,[newApproverId,`单据 ${row.document_no} 已转交给您审批。`,row.document_type,id,user.id,`单据 ${row.document_no} 已转交给新的审批人。`]);
+      await this.approvalHistory.record(qr,id,'TRANSFERRED','SUBMITTED','SUBMITTED',user.id,{reason:`转交给审批人 ${newApproverId}`});
+      await qr.commitTransaction(); return {ok:true};
+    }catch(e){await qr.rollbackTransaction();throw e;}finally{await qr.release();}
+  }
   private async completedRetry(userId:string,key:string|undefined,endpoint:string) {
     if(!key?.trim())return false;
     const [row]=await this.db.query(`SELECT 1 FROM idempotency_keys WHERE user_id=$1 AND idempotency_key=$2 AND endpoint=$3 AND response_payload IS NOT NULL`,[userId,key,endpoint]);

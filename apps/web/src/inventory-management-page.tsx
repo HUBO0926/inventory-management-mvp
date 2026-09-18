@@ -19,7 +19,7 @@ const safe = (value: any, fallback: any = '—'): any => value === undefined || 
 const dateTime = formatBeijingTime;
 const can = (user: UserLike, permission: string) => user.role === 'ADMIN' || Boolean(user.permissions?.includes(permission));
 const typeOptions = [
-  'MATERIAL_INBOUND', 'FINISHED_INBOUND', 'FINISHED_OUTBOUND', 'INVENTORY_ADJUSTMENT', 'STOCK_MOVE',
+  'MATERIAL_INBOUND', 'FINISHED_INBOUND', 'FINISHED_OUTBOUND', 'INVENTORY_ADJUSTMENT', 'STOCK_MOVE', 'STOCK_CHECK',
   'PRODUCTION_ISSUE', 'PRODUCTION_RETURN', 'PRODUCTION_COMPLETION',
   'DEFECTIVE_RETURN', 'DEFECTIVE_REPAIR_RESTOCK', 'DEFECTIVE_PRODUCTION_RETURN', 'REVERSAL',
 ].map(value => ({ value, label: statusText[value] || value }));
@@ -137,6 +137,9 @@ function DocumentDetail({ detail, open, mobile, onClose, onAction, onEdit, user 
         { title: '批次', dataIndex: 'batchNo', render: safe },
         { title: '数量', align: 'right' as const, render: (_: any, row: any) => `${formatQuantity(row.quantity)} ${safe(row.unit, '')}` },
       ]} />
+      {detail.documentType==='STOCK_CHECK'&&<Card size="small" title="盘点明细"><Table size="small" rowKey="id" pagination={false} dataSource={detail.stockCheckLines||[]} columns={[
+        {title:'物料',render:(_:any,row:any)=>`${safe(row.itemCode)} ${safe(row.itemName)}`},{title:'库位',render:(_:any,row:any)=>`${safe(row.zoneCode)} / ${safe(row.locationCode)}`},{title:'批次',dataIndex:'batchNo',render:safe},{title:'账面数',dataIndex:'systemQtySnapshot',render:(v:any)=>v===null?'提交时生成':formatQuantity(v)},{title:'实盘数',dataIndex:'countedQty',render:formatQuantity},{title:'差异',dataIndex:'differenceQty',render:(v:any)=>v===null?'—':formatQuantity(v)},{title:'单位',dataIndex:'unit'}
+      ]}/></Card>}
       {detail.receiptAllocations?.length>0&&<Card size="small" title="审核入库分配"><Table size="small" rowKey={(row:any)=>`${row.documentLineId}-${row.disposition}-${row.locationId}`} pagination={false} dataSource={detail.receiptAllocations} columns={[
         {title:'类别',dataIndex:'disposition',render:(value:string)=>value==='NORMAL'?'正常品':'不良品'},
         {title:'仓库 / 库位',render:(_:any,row:any)=>`${safe(row.warehouseCode)} / ${safe(row.locationCode)}`},
