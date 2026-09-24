@@ -176,12 +176,12 @@ describe('库存管理固定验收场景',()=>{
     const before=await balanceOf('FG','FG-001');
     expect(before).toBe('7');
     await request(app.getHttpServer()).post('/api/stock-documents/finished-inbound').set(auth(production)).send({lines:[{itemId:ids['FG-001'],quantity:'5'}]}).expect(403);
-    await request(app.getHttpServer()).post('/api/stock-documents/finished-inbound').set(auth(warehouse)).send({lines:[{itemId:ids['M-001'],quantity:'5'}]}).expect(400);
+    await request(app.getHttpServer()).post('/api/stock-documents/finished-inbound').set(auth(warehouse)).send({warehouseId:ids.outboundSource.warehouseId,lines:[{itemId:ids['M-001'],locationId:ids.outboundSource.locationId,quantity:'5'}]}).expect(400);
     const inactive=await request(app.getHttpServer()).post('/api/items').set(auth(admin)).send({itemCode:'FG-INACTIVE',name:'停用成品',itemType:'FINISHED_GOOD',unit:'台'}).expect(201);
     await request(app.getHttpServer()).patch(`/api/items/${inactive.body.data.id}`).set(auth(admin)).send({status:'INACTIVE'}).expect(200);
-    await request(app.getHttpServer()).post('/api/stock-documents/finished-inbound').set(auth(warehouse)).send({lines:[{itemId:inactive.body.data.id,quantity:'1'}]}).expect(400);
+    await request(app.getHttpServer()).post('/api/stock-documents/finished-inbound').set(auth(warehouse)).send({warehouseId:ids.outboundSource.warehouseId,lines:[{itemId:inactive.body.data.id,locationId:ids.outboundSource.locationId,quantity:'1'}]}).expect(400);
 
-    const draft=await request(app.getHttpServer()).post('/api/stock-documents/finished-inbound').set(auth(warehouse)).send({notes:'非生产来源成品',lines:[{itemId:ids['FG-001'],quantity:'5'}]}).expect(201);
+    const draft=await request(app.getHttpServer()).post('/api/stock-documents/finished-inbound').set(auth(warehouse)).send({warehouseId:ids.outboundSource.warehouseId,notes:'非生产来源成品',lines:[{itemId:ids['FG-001'],locationId:ids.outboundSource.locationId,quantity:'5'}]}).expect(201);
     ids.finishedInbound=draft.body.data.id;
     expect(draft.body.data.documentType).toBe('FINISHED_INBOUND');
     expect(draft.body.data.documentNo).toMatch(/^CPRK-\d{14}(?:-\d{2,})?$/);
@@ -195,7 +195,7 @@ describe('库存管理固定验收场景',()=>{
     await request(app.getHttpServer()).patch(`/api/stock-documents/${ids.finishedInbound}`).set(auth(warehouse)).send({lines:[{itemId:ids['FG-001'],quantity:'6'}]}).expect(400);
     await request(app.getHttpServer()).delete(`/api/stock-documents/${ids.finishedInbound}`).set(auth(warehouse)).expect(400);
 
-    const conflictDraft=await request(app.getHttpServer()).post('/api/stock-documents/finished-inbound').set(auth(warehouse)).send({lines:[{itemId:ids['FG-001'],quantity:'1'}]}).expect(201);
+    const conflictDraft=await request(app.getHttpServer()).post('/api/stock-documents/finished-inbound').set(auth(warehouse)).send({warehouseId:ids.outboundSource.warehouseId,lines:[{itemId:ids['FG-001'],locationId:ids.outboundSource.locationId,quantity:'1'}]}).expect(201);
     await request(app.getHttpServer()).post(`/api/stock-documents/${conflictDraft.body.data.id}/submit`).set(auth(warehouse)).send({}).expect(201);
     await request(app.getHttpServer()).post(`/api/approvals/${conflictDraft.body.data.id}/approve`).set(auth(admin)).set('Idempotency-Key','finished-inbound-post').send({}).expect(409);
     await request(app.getHttpServer()).post(`/api/stock-documents/${conflictDraft.body.data.id}/withdraw`).set(auth(warehouse)).send({}).expect(201);

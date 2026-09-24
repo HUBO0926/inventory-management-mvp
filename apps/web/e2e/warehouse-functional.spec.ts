@@ -43,25 +43,25 @@ test('生产人员不显示仓库管理入口且接口边界由服务端拒绝',
   expect(status).toBe(403);
 });
 
-test('仓库、库区、库位和物料上下文均能预填操作弹窗', async ({ page }, testInfo) => {
+test('仓库、库区、库位和物料上下文均能传入入库单', async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== 'desktop-chromium');
   await login(page, 'warehouse');
-  const open = async (url: string, name: string) => {
+  const open = async (url: string, expected: string[]) => {
     await page.goto(url);
     await page.getByRole('button', { name: '入库' }).first().click();
-    const dialog = page.getByRole('dialog', { name: new RegExp(`入库.*${name}`) });
-    await expect(dialog).toBeVisible();
-    await dialog.locator('.ant-modal-close').click();
-    await expect(dialog).toBeHidden();
+    await expect(page).toHaveURL(/\/inbound\?/);
+    await expect(page.getByRole('dialog', { name: '新建原材料入库单' })).toBeVisible();
+    for (const key of expected) expect(new URL(page.url()).searchParams.get(key)).toBeTruthy();
   };
-  await open('/inventory/warehouse-management?warehouse=TEST-FUNC-RAW-A', '原材料测试一仓');
-  await open('/inventory/warehouse-management?warehouse=TEST-FUNC-RAW-A&zone=TEST-FUNC-RAW-A-A', '收发库区');
-  await open('/inventory/warehouse-management?warehouse=TEST-FUNC-RAW-A&zone=TEST-FUNC-RAW-A-A&location=TEST-FUNC-RAW-A-A-01', '收发库区1号库位');
+  const warehouse = '/inventory/warehouse-management?warehouse=TEST-FUNC-RAW-A';
+  await open(warehouse, ['warehouseId']);
+  await open(`${warehouse}&zone=TEST-FUNC-RAW-A-A`, ['warehouseId', 'zoneId']);
+  await open(`${warehouse}&zone=TEST-FUNC-RAW-A-A&location=TEST-FUNC-RAW-A-A-01`, ['warehouseId', 'zoneId', 'locationId']);
   await page.goto('/inventory/warehouse-management?warehouse=TEST-FUNC-RAW-A&zone=TEST-FUNC-RAW-A-A&location=TEST-FUNC-RAW-A-A-01');
   await page.getByText('TEST-FUNC-M-001', { exact: false }).first().click();
   await page.getByRole('button', { name: '入库' }).last().click();
-  await expect(page.getByRole('dialog', { name: /入库.*收发库区1号库位/ })).toBeVisible();
-  await expect(page.getByRole('combobox', { name: '物料' })).toBeDisabled();
+  await expect(page).toHaveURL(/\/inbound\?.*itemId=/);
+  await expect(page.getByRole('dialog', { name: '新建原材料入库单' })).toBeVisible();
 });
 
 test('仓库管理与虚拟仓可双向定位', async ({ page }, testInfo) => {
@@ -72,7 +72,7 @@ test('仓库管理与虚拟仓可双向定位', async ({ page }, testInfo) => {
   await expect(page).toHaveURL(/virtual-warehouse\?warehouse=TEST-FUNC-RAW-A.*location=TEST-FUNC-RAW-A-A-01/);
   await expect(page.getByRole('heading', { name: '虚拟仓库' })).toBeVisible();
   await page.getByText('库位视图').click();
-  await page.getByRole('button', { name: '查看详细信息' }).click();
+  await page.getByRole('button', { name: '查看详情' }).click();
   await expect(page).toHaveURL(/inventory\/warehouse-management.*warehouse=TEST-FUNC-RAW-A.*location=TEST-FUNC-RAW-A-A-01/);
   await expect(page.getByText('库位物料库存')).toBeVisible();
 });
@@ -102,16 +102,26 @@ test('仓管可从库位弹窗提交入库，审批过账后页面刷新库存�
   await login(page, 'warehouse');
   await page.goto('/inventory/warehouse-management?warehouse=TEST-FUNC-RAW-A&zone=TEST-FUNC-RAW-A-A&location=TEST-FUNC-RAW-A-A-01');
   await page.getByRole('button', { name: '入库' }).first().click();
-  const dialog = page.getByRole('dialog', { name: /入库.*收发库区1号库位/ });
+  await expect(page).toHaveURL(/\/inbound\?/);
+  const dialog = page.getByRole('dialog', { name: '新建原材料入库单' });
   await dialog.getByLabel('物料').click();
-  await page.getByText('TEST-FUNC-M-001 测试电机 (个)', { exact: true }).last().click();
-  await dialog.getByLabel('数量').fill('1');
+  await page.getByText('TEST-FUNC-M-001 测试电机', { exact: true }).last().click();
+  await dialog.getByRole('button', { name: '选择入库位置' }).click();
+  const picker = page.getByRole('dialog', { name: '选择入库位置' });
+  await picker.getByPlaceholder('搜索仓库 / 库区 / 库位 / 物料').fill('TEST-FUNC-RAW-A-A-01');
+  await picker.getByText('TEST-FUNC-RAW-A-A-01', { exact: false }).last().click();
+  await picker.getByRole('button', { name: '确认选择' }).click();
+  await dialog.getByLabel('入库数量').fill('1');
   const marker = `TEST-RUN-UI-${Date.now()}`;
   await dialog.getByLabel('备注').fill(marker);
   const created = page.waitForResponse(response => response.url().includes('/stock-documents/material-inbound') && response.request().method() === 'POST');
-  await dialog.getByRole('button', { name: '提交审批' }).click();
+  await dialog.getByRole('button', { name: '确定' }).click();
   const document = (await (await created).json()).data;
-  await expect(page.getByText('单据已创建并提交审批')).toBeVisible();
+  await expect(page.getByText('单据已保存')).toBeVisible();
+
+  const warehouseToken = await page.evaluate(() => localStorage.getItem('inventory_token'));
+  const submitted = await request.post(`/api/stock-documents/${document.id}/submit`, { headers: { Authorization: `Bearer ${warehouseToken}` }, data: {} });
+  expect(submitted.ok()).toBe(true);
 
   const loginResponse = await request.post('/api/auth/login', { data: { username: 'admin', password } });
   expect(loginResponse.ok()).toBe(true);
