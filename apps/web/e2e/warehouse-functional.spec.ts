@@ -115,7 +115,7 @@ test('仓管可从库位弹窗提交入库，审批过账后页面刷新库存�
   const marker = `TEST-RUN-UI-${Date.now()}`;
   await dialog.getByLabel('备注').fill(marker);
   const created = page.waitForResponse(response => response.url().includes('/stock-documents/material-inbound') && response.request().method() === 'POST');
-  await dialog.getByRole('button', { name: '确定' }).click();
+  await dialog.locator('.ant-modal-footer .ant-btn-primary').click();
   const document = (await (await created).json()).data;
   await expect(page.getByText('单据已保存')).toBeVisible();
 
