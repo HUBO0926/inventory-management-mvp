@@ -74,11 +74,13 @@ describe('库存管理固定验收场景',()=>{
     await expectBalances({RAW:{'M-003':'261'}});r=await request(app.getHttpServer()).get(`/api/production-orders/${ids.order}`).set(auth(admin)).expect(200);expect(r.body.data.materials.find((x:any)=>x.itemCode==='M-003').netIssuedQty).toBe('39');
     r=await request(app.getHttpServer()).post(`/api/production-orders/${ids.order}/complete`).set(auth(production)).set('Idempotency-Key','accept-complete-6-create').send({quantity:'6'}).expect(201);await submitApprove(r.body.data.id,'accept-complete-6');await expectBalances({FG:{'FG-001':'6'}});
     r=await request(app.getHttpServer()).post(`/api/production-orders/${ids.order}/complete`).set(auth(production)).set('Idempotency-Key','accept-complete-4-create').send({quantity:'4'}).expect(201);await submitApprove(r.body.data.id,'accept-complete-4');await expectBalances({FG:{'FG-001':'10'}});r=await request(app.getHttpServer()).get(`/api/production-orders/${ids.order}`).set(auth(admin)).expect(200);expect(r.body.data.status).toBe('COMPLETED');
-    r=await request(app.getHttpServer()).post('/api/stock-documents/finished-outbound').set(auth(warehouse)).send({lines:[{itemId:ids['FG-001'],quantity:'3'}]}).expect(201);ids.outbound=r.body.data.id;
+    const [outboundSource] = await db.query(`SELECT b.warehouse_id "warehouseId",b.location_id "locationId" FROM stock_balances b JOIN warehouses w ON w.id=b.warehouse_id WHERE b.item_id=$1 AND w.warehouse_type='FG' AND b.on_hand_qty>0 ORDER BY b.on_hand_qty DESC LIMIT 1`, [ids['FG-001']]);
+    ids.outboundSource = outboundSource;
+    r=await request(app.getHttpServer()).post('/api/stock-documents/finished-outbound').set(auth(warehouse)).send({warehouseId:outboundSource.warehouseId,lines:[{itemId:ids['FG-001'],locationId:outboundSource.locationId,quantity:'3'}]}).expect(201);ids.outbound=r.body.data.id;
     await request(app.getHttpServer()).post(`/api/stock-documents/${ids.outbound}/submit`).set(auth(warehouse)).send({}).expect(201);
     const first=await request(app.getHttpServer()).post(`/api/approvals/${ids.outbound}/approve`).set(auth(admin)).set('Idempotency-Key','accept-outbound').send({}).expect(201);
     const repeat=await request(app.getHttpServer()).post(`/api/approvals/${ids.outbound}/approve`).set(auth(admin)).set('Idempotency-Key','accept-outbound').send({}).expect(201);expect(repeat.body.data).toEqual(first.body.data);await expectBalances({FG:{'FG-001':'7'}});
-    r=await request(app.getHttpServer()).post('/api/stock-documents/finished-outbound').set(auth(warehouse)).send({lines:[{itemId:ids['FG-001'],quantity:'8'}]}).expect(201);await request(app.getHttpServer()).post(`/api/stock-documents/${r.body.data.id}/submit`).set(auth(warehouse)).send({}).expect(409);await expectBalances({FG:{'FG-001':'7'}});
+    r=await request(app.getHttpServer()).post('/api/stock-documents/finished-outbound').set(auth(warehouse)).send({warehouseId:outboundSource.warehouseId,lines:[{itemId:ids['FG-001'],locationId:outboundSource.locationId,quantity:'8'}]}).expect(201);await request(app.getHttpServer()).post(`/api/stock-documents/${r.body.data.id}/submit`).set(auth(warehouse)).send({}).expect(409);await expectBalances({FG:{'FG-001':'7'}});
     const cockpit=await request(app.getHttpServer()).get('/api/dashboard/cockpit?days=14').set(auth(admin)).expect(200);
     expect(cockpit.body.data.kpis).toMatchObject({materialSkuCount:3,finishedGoodSkuCount:1,inventoryRiskSkuCount:0,activeProductionOrderCount:0});
     expect(cockpit.body.data.productionStatus.find((x:any)=>x.status==='COMPLETED').count).toBe(1);
@@ -286,7 +288,7 @@ describe('库存管理固定验收场景',()=>{
   });
 
   it('同一成品库存并发出库时不会产生负库存',async()=>{
-    const created=await Promise.all(Array.from({length:10},()=>request(app.getHttpServer()).post('/api/stock-documents/finished-outbound').set(auth(warehouse)).send({lines:[{itemId:ids['FG-001'],quantity:'1'}]})));
+    const created=await Promise.all(Array.from({length:10},()=>request(app.getHttpServer()).post('/api/stock-documents/finished-outbound').set(auth(warehouse)).send({warehouseId:ids.outboundSource.warehouseId,lines:[{itemId:ids['FG-001'],locationId:ids.outboundSource.locationId,quantity:'1'}]})));
     expect(created.every(result=>result.status===201)).toBe(true);
     const documentNumbers=created.map(result=>result.body.data.documentNo);
     expect(new Set(documentNumbers).size).toBe(10);

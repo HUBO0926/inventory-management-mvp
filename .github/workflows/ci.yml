@@ -55,6 +55,8 @@ jobs:
       - run: docker compose -p inventory-ci up -d --build
       - name: Wait for application
         run: timeout 180 sh -c 'until curl -fsS http://127.0.0.1:8080/api/health; do sleep 3; done'
+      - name: Seed warehouse browser fixtures
+        run: docker compose -p inventory-ci exec -T api node dist/database/seed-functional-warehouse.js
       - run: pnpm test:playwright
         env:
           PLAYWRIGHT_BASE_URL: http://127.0.0.1:8080
