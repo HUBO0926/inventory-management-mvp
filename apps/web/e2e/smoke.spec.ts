@@ -44,7 +44,7 @@ test('管理员可切换主题并查看构建版本', async ({ page }, testInfo)
   await login(page, 'admin');
   await page.getByLabel('切换浅色/深色主题').click();
   await expect.poll(() => page.evaluate(() => document.documentElement.dataset.theme)).toBe('dark');
-  await expect(page.getByText('V1.7.0', { exact: true })).toBeVisible();
+  await expect(page.getByText('V1.8.0', { exact: true })).toBeVisible();
 });
 
 test('管理员新增账号时姓名字段可通过参数校验', async ({ page }, testInfo) => {

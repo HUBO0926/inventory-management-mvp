@@ -1,12 +1,16 @@
 ﻿import { useEffect, useMemo, useState } from 'react';
 import dayjs from 'dayjs';
-import { useNavigate } from 'react-router-dom';
+import { useRef } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { Button, Card, Checkbox, Descriptions, Drawer, Form, Input, InputNumber, Modal, Popconfirm, Select, Space, Switch, Tag, Typography, message } from 'antd';
 import { DeleteOutlined, DownloadOutlined, PlusOutlined } from '@ant-design/icons';
 import { api, idempotencyKey, token } from './api';
 import { PageScaffold, StatusTag } from './components';
 import { ResponsiveTable as Table } from './responsive';
 import { formatBeijingTime, formatQuantity, statusText } from './domain';
+import { FinishedInboundEditor } from './finished-inbound-editor';
+import { LocationName, locationDisplayName } from './location-name';
+import { WarehouseLocationSelector } from './warehouse-location-selector';
 import { useParams } from 'react-router-dom';
 import type { User } from './App';
 
@@ -170,7 +174,7 @@ export function LocationsPage() {
     <Card title="库位物料容量" style={{ marginTop: 16 }} extra={<Button type="primary" onClick={() => { capacityForm.resetFields(); setCapacityOpen(true); }}>配置物料容量</Button>}>
       <Typography.Text type="secondary">未配置容量的物料在该库位不限量；容量按“库位 + 物料”分别维护。</Typography.Text>
       <Table style={{ marginTop: 12 }} rowKey={(row: any) => `${row.locationId}-${row.itemId}`} pagination={false} dataSource={capacities} columns={[
-        { title: '仓库 / 库区 / 库位', render: (_: any, row: any) => `${row.warehouseCode} / ${row.zoneCode} / ${row.locationCode}` },
+        { title: '库位', render: (_: any, row: any) => <LocationName location={row} /> },
         { title: '物料', render: (_: any, row: any) => `${row.itemCode} ${row.itemName}` },
         { title: '容量', render: (_: any, row: any) => `${formatQuantity(row.capacity)} ${row.unit}` },
         { title: '操作', render: (_: any, row: any) => <Popconfirm title="取消后该物料在此库位将不再受容量限制，确认继续？" onConfirm={() => removeCapacity(row)}><Button danger type="link">取消限制</Button></Popconfirm> },
@@ -226,17 +230,25 @@ export function StockDocumentsV110Page({ type }: { type: StockType }) {
   const outbound = type === 'FINISHED_OUTBOUND';
   const [rows, setRows] = useState<any[]>([]);
   const [items, setItems] = useState<any[]>([]);
-  const [sourceItems, setSourceItems] = useState<any[]>([]);
-  const [sourceItemsLoading, setSourceItemsLoading] = useState(false);
   const [warehouses, setWarehouses] = useState<any[]>([]);
   const [locations, setLocations] = useState<any[]>([]);
   const [batches, setBatches] = useState<any[]>([]);
   const [editing, setEditing] = useState<any>();
   const [open, setOpen] = useState(false);
   const [form] = Form.useForm();
+  const route = useLocation();
+  const navigate = useNavigate();
+  const [openedFromQuery, setOpenedFromQuery] = useState(false);
   const watchedWarehouseId = Form.useWatch('warehouseId', form);
   const watchedLines = Form.useWatch('lines', form);
   const [inventoryByKey, setInventoryByKey] = useState<Record<string, any>>({});
+  const [sourceDistributions, setSourceDistributions] = useState<Record<string, any>>({});
+  const [scopedSourceItems, setScopedSourceItems] = useState<any[]>([]);
+  const [targetPicker, setTargetPicker] = useState<{ index: number; itemId: string }>();
+  const [inboundPicker, setInboundPicker] = useState<{ index: number; itemId: string }>();
+  const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
+  const sourceScope = useMemo(() => ({ warehouseId: new URLSearchParams(route.search).get('warehouseId') || undefined, zoneId: new URLSearchParams(route.search).get('zoneId') || undefined, locationId: new URLSearchParams(route.search).get('locationId') || undefined }), [route.search]);
   const load = () => Promise.all([
     api(`/stock-documents?documentType=${type}&pageSize=100`), api(`/items?pageSize=100&status=ACTIVE${meta.itemType ? `&itemType=${meta.itemType}` : ''}`),
     api('/warehouses'), api('/warehouse-locations?pageSize=100'), api('/batches?pageSize=100'),
@@ -246,29 +258,53 @@ export function StockDocumentsV110Page({ type }: { type: StockType }) {
   }).catch(fail);
   useEffect(() => { void load(); }, [type]);
   useEffect(() => {
-    if (!open || !(outbound || moving) || !watchedWarehouseId) {
-      setSourceItems([]);
-      setSourceItemsLoading(false);
-      return;
-    }
+    const params = new URLSearchParams(route.search);
+    if (openedFromQuery || params.get('new') !== '1') return;
+    setOpenedFromQuery(true);
+    const itemId = params.get('itemId') || undefined;
+    const warehouseId = params.get('warehouseId') || undefined;
+    const locationId = params.get('locationId') || undefined;
+    setEditing(undefined); setSourceDistributions({}); form.resetFields();
+    form.setFieldsValue(type === 'FINISHED_INBOUND' ? { lines: [{ itemId, quantity: 1 }], suggestedLocationId: locationId } : outbound || moving ? { lines: [{ itemId, quantity: 1 }] } : { warehouseId, lines: [{ itemId, locationId }] });
+    setOpen(true); params.delete('new'); navigate(`${route.pathname}${params.size ? `?${params}` : ''}`, { replace: true });
+  }, [openedFromQuery, route.pathname, route.search, type]);
+  useEffect(() => { if (outbound || moving) setSourceDistributions({}); }, [outbound, moving, sourceScope.warehouseId, sourceScope.zoneId, sourceScope.locationId]);
+  useEffect(() => {
+    if (!open || !(outbound || moving)) return;
+    const itemIds = [...new Set((watchedLines || []).map((line: any) => line?.itemId).filter(Boolean))] as string[];
     let active = true;
-    const purpose = moving ? 'MOVE_SOURCE' : 'OUTBOUND';
-    const loadCandidates = async () => {
-      setSourceItemsLoading(true);
-      const first = await api(`/stock-documents/source-item-options?${new URLSearchParams({ warehouseId: watchedWarehouseId, purpose, page: '1', pageSize: '100' })}`);
-      const pageCount = Math.ceil(Number(first.total || 0) / Number(first.pageSize || 100));
-      const rest = await Promise.all(Array.from({ length: Math.max(0, pageCount - 1) }, (_, index) => api(`/stock-documents/source-item-options?${new URLSearchParams({ warehouseId: watchedWarehouseId, purpose, page: String(index + 2), pageSize: String(first.pageSize || 100) })}`)));
-      if (active) setSourceItems([...(first.items || []), ...rest.flatMap((page: any) => page.items || [])]);
-    };
-    void loadCandidates().catch(error => { if (active) fail(error); }).finally(() => { if (active) setSourceItemsLoading(false); });
+    const missingItemIds = itemIds.filter(itemId => !sourceDistributions[itemId]);
+    if (!missingItemIds.length) return;
+    void Promise.all(missingItemIds.map(async itemId => [itemId, await api(`/stock-documents/source-distribution?${new URLSearchParams({ itemId, ...Object.fromEntries(Object.entries(sourceScope).filter(([, value]) => Boolean(value))) })}`)] as const))
+      .then(rows => { if (active) setSourceDistributions(current => ({ ...current, ...Object.fromEntries(rows) })); })
+      .catch(fail);
     return () => { active = false; };
-  }, [moving, open, outbound, watchedWarehouseId]);
+  }, [moving, open, outbound, sourceDistributions, watchedLines?.map((line: any) => line?.itemId || '').join('|'), sourceScope.warehouseId, sourceScope.zoneId, sourceScope.locationId]);
+  useEffect(() => {
+    if (!open || !(outbound || moving) || !sourceScope.warehouseId) return;
+    const params = new URLSearchParams({ warehouseId: sourceScope.warehouseId, purpose: moving ? 'MOVE_SOURCE' : 'OUTBOUND', ...Object.fromEntries(Object.entries(sourceScope).filter(([key, value]) => key !== 'warehouseId' && Boolean(value))) });
+    api(`/stock-documents/source-item-options?${params}`).then((result: any) => setScopedSourceItems(result.items || [])).catch(fail);
+  }, [open, outbound, moving, sourceScope.warehouseId, sourceScope.zoneId, sourceScope.locationId]);
+  useEffect(() => {
+    if (!open || !(outbound || moving)) return;
+    const current = form.getFieldValue('lines') || [];
+    let changed = false;
+    const next = current.map((line: any) => {
+      if (!line?.itemId || line.locationId) return line;
+      const candidates = (sourceDistributions[line.itemId]?.locations || []).flatMap((location: any) => (location.batches || []).filter((batch: any) => Number(batch.availableQty) > 0).map((batch: any) => ({ location, batch })));
+      // A location/material deep link with one real usable batch should be ready immediately.
+      if (candidates.length !== 1) return line;
+      const { location, batch } = candidates[0]; changed = true;
+      return { ...line, locationId: location.locationId, batchId: batch.batchId, sourceKey: `${location.locationId}:${batch.batchId || ''}`, sourceWarehouseId: location.warehouseId, sourceZoneId: location.zoneId, sourceLocationPath: locationDisplayName(location), sourceLocationDisplay: location };
+    });
+    if (changed) form.setFieldsValue({ lines: next, warehouseId: sourceWarehouseFromLines(next) });
+  }, [open, outbound, moving, sourceDistributions, watchedLines?.map((line: any) => `${line?.itemId || ''}:${line?.locationId || ''}`).join('|')]);
   useEffect(() => {
     if (!(inbound || outbound || moving)) return;
     const lines = watchedLines || [];
     const requests = new Map<string, { warehouseId: string; itemId: string; purpose: string }>();
     for (const line of lines) {
-      if (watchedWarehouseId && line?.itemId) requests.set(`${watchedWarehouseId}:${line.itemId}:${moving ? 'MOVE_SOURCE' : outbound ? 'OUTBOUND' : 'INBOUND'}`, { warehouseId: watchedWarehouseId, itemId: line.itemId, purpose: moving ? 'MOVE_SOURCE' : outbound ? 'OUTBOUND' : 'INBOUND' });
+      if (inbound && watchedWarehouseId && line?.itemId) requests.set(`${watchedWarehouseId}:${line.itemId}:INBOUND`, { warehouseId: watchedWarehouseId, itemId: line.itemId, purpose: 'INBOUND' });
       if (moving && line?.targetWarehouseId && line?.itemId) requests.set(`${line.targetWarehouseId}:${line.itemId}:MOVE_TARGET`, { warehouseId: line.targetWarehouseId, itemId: line.itemId, purpose: 'MOVE_TARGET' });
     }
     let active = true;
@@ -277,14 +313,48 @@ export function StockDocumentsV110Page({ type }: { type: StockType }) {
       .catch(fail);
     return () => { active = false; };
   }, [inbound, moving, outbound, watchedLines, watchedWarehouseId]);
-  const save = async (values: any) => {
-    const lines = values.lines.map(({ sourceKey, ...line }: any) => adjustment
+  const sourceWarehouseFromLines = (lines: any[]) => {
+    const warehouseIds = [...new Set(lines.map(line => line?.sourceWarehouseId).filter(Boolean))];
+    return warehouseIds.length === 1 ? warehouseIds[0] : undefined;
+  };
+  const save = async (values: any, submit = false) => {
+    if (savingRef.current) return;
+    const currentLines = form.getFieldValue('lines') || values.lines || [];
+    let warehouseId = values.warehouseId;
+    if (outbound || moving) {
+      const missingSourceIndex = currentLines.findIndex((line: any) => !line?.sourceWarehouseId || !line?.locationId);
+      if (missingSourceIndex >= 0) {
+        form.setFields([{ name: ['lines', missingSourceIndex, 'locationId'], errors: [moving ? '请先选择移出位置' : '请先选择出库位置'] }]);
+        return;
+      }
+      const sourceWarehouseIds = [...new Set(currentLines.map((line: any) => line.sourceWarehouseId))];
+      if (sourceWarehouseIds.length !== 1) {
+        form.setFields(currentLines.map((_: any, index: number) => ({ name: ['lines', index, 'locationId'], errors: ['同一张单据只能选择同一来源仓库'] })));
+        return;
+      }
+      warehouseId = sourceWarehouseIds[0];
+      form.setFieldValue('warehouseId', warehouseId);
+    }
+    const lines = currentLines.map(({ sourceKey, locationPath, locationDisplay: _locationDisplay, sourceLocationPath, sourceLocationDisplay: _sourceLocationDisplay, sourceWarehouseId: _sourceWarehouseId, sourceZoneId: _sourceZoneId, targetZoneId: _targetZoneId, targetLocationPath, targetLocationDisplay: _targetLocationDisplay, targetRemainingCapacityQty, warehouseId: _warehouseId, zoneId: _zoneId, ...line }: any) => adjustment
       ? { ...line, adjustmentQty: String(line.adjustmentQty) }
       : { ...line, quantity: String(line.quantity) });
+    savingRef.current = true;
+    setSaving(true);
     try {
-      await api(editing ? `/stock-documents/${editing.id}` : meta.endpoint, { method: editing ? 'PATCH' : 'POST', body: JSON.stringify({ warehouseId: values.warehouseId, notes: values.notes, lines }) });
-      message.success('单据已保存'); setOpen(false); setEditing(undefined); load();
-    } catch (error) { fail(error); }
+      const document = await api(editing ? `/stock-documents/${editing.id}` : meta.endpoint, { method: editing ? 'PATCH' : 'POST', body: JSON.stringify({ warehouseId, notes: values.notes, lines }) });
+      if (submit) await api(`/stock-documents/${document.id}/submit`, { method: 'POST' });
+      message.success(submit ? '单据已保存并提交审批' : '单据已保存'); setOpen(false); setEditing(undefined); load();
+    } catch (error: any) {
+      const lineErrors = error?.details?.lineErrors || [];
+      if (lineErrors.length) form.setFields(lineErrors.map((row: any) => ({ name: ['lines', row.index, row.field], errors: [row.message] })));
+      fail(error);
+    } finally { savingRef.current = false; setSaving(false); }
+  };
+  const removeDocumentLine = (index: number, removeLine: (index: number) => void) => {
+    const next = [...(form.getFieldValue('lines') || [])];
+    next.splice(index, 1);
+    removeLine(index);
+    if (outbound || moving) form.setFieldsValue({ lines: next, warehouseId: sourceWarehouseFromLines(next) });
   };
   const run = async (record: any, action: string, body?: any) => {
     try {
@@ -300,7 +370,7 @@ export function StockDocumentsV110Page({ type }: { type: StockType }) {
   const edit = async (record: any) => {
     try {
       const detail = await api(`/stock-documents/${record.id}`);
-      setEditing(detail); form.setFieldsValue({ warehouseId: detail.warehouseId, notes: detail.notes, lines: detail.lines.map((line: any) => ({ itemId: line.itemId, locationId: line.locationId, batchId: line.batchId, sourceKey: `${line.locationId}:${line.batchId || ''}`, targetWarehouseId: line.targetWarehouseId, targetLocationId: line.targetLocationId, targetBatchId: line.targetBatchId, quantity: Number(line.quantity) })) }); setOpen(true);
+      setEditing(detail); form.setFieldsValue({ warehouseId: detail.warehouseId, notes: detail.notes, lines: detail.lines.map((line: any) => { const sourceLocationDisplay = { locationDisplayName: line.locationDisplayName || line.locationCode, actualPosition: line.actualPosition }; const targetLocationDisplay = { locationDisplayName: line.targetLocationDisplayName || line.targetLocationCode, actualPosition: line.targetActualPosition }; return { itemId: line.itemId, locationId: line.locationId, locationPath: locationDisplayName(sourceLocationDisplay), locationDisplay: sourceLocationDisplay, batchId: line.batchId, batchNo: line.batchNo, sourceKey: `${line.locationId}:${line.batchId || ''}`, sourceWarehouseId: line.sourceWarehouseId || detail.warehouseId, sourceZoneId: line.sourceZoneId, sourceLocationPath: locationDisplayName(sourceLocationDisplay), sourceLocationDisplay, targetWarehouseId: line.targetWarehouseId, targetLocationId: line.targetLocationId, targetBatchId: line.targetBatchId, targetLocationPath: locationDisplayName(targetLocationDisplay), targetLocationDisplay, quantity: Number(line.quantity) }; }) }); setOpen(true);
     } catch (error) { fail(error); }
   };
   useEffect(() => {
@@ -309,7 +379,7 @@ export function StockDocumentsV110Page({ type }: { type: StockType }) {
   }, [type]);
   const remove = async (id: string) => { try { await api(`/stock-documents/${id}`, { method: 'DELETE' }); message.success('单据已删除'); load(); } catch (error) { fail(error); } };
   return <PageScaffold title={meta.title} subtitle="草稿提交后进入一级审核；只有审核通过才会改变库存和生产累计。">
-    <div className="toolbar"><span /><Button type="primary" onClick={() => { const params = new URLSearchParams(window.location.search); const warehouseId = params.get('warehouseId') || undefined; const zoneId = params.get('zoneId') || undefined; const sourceLocation = locations.find(location => location.warehouseId === warehouseId && (!zoneId || location.zoneId === zoneId)); setEditing(undefined); form.resetFields(); form.setFieldsValue({ warehouseId, lines: [{ locationId: sourceLocation?.id }] }); setOpen(true); }}>新建{meta.title}单</Button></div>
+    <div className="toolbar"><span /><Button type="primary" onClick={() => { const params = new URLSearchParams(window.location.search); const warehouseId = params.get('warehouseId') || undefined; const zoneId = params.get('zoneId') || undefined; const sourceLocation = locations.find(location => location.warehouseId === warehouseId && (!zoneId || location.zoneId === zoneId)); setEditing(undefined); setSourceDistributions({}); form.resetFields(); form.setFieldsValue(type === 'FINISHED_INBOUND' ? { lines: [{ quantity: 1 }], suggestedLocationId: sourceLocation?.id } : outbound || moving ? { lines: [{ quantity: 1 }] } : { warehouseId, lines: [{ locationId: sourceLocation?.id }] }); setOpen(true); }}>新建{meta.title}单</Button></div>
     <Table rowKey="id" dataSource={rows} columns={[
       { title: '单号', dataIndex: 'documentNo' }, { title: '仓库', dataIndex: 'warehouseCode' }, { title: '状态', dataIndex: 'status', render: value => <StatusTag value={value} /> },
       { title: '创建时间', dataIndex: 'createdAt', render: formatBeijingTime },
@@ -321,54 +391,86 @@ export function StockDocumentsV110Page({ type }: { type: StockType }) {
         {['DRAFT', 'REJECTED'].includes(record.status) && <Popconfirm title="确认删除该草稿？" onConfirm={() => remove(record.id)}><Button danger type="link" icon={<DeleteOutlined />}>删除</Button></Popconfirm>}
       </Space> },
     ]} />
-    <Modal width={760} title={`${editing ? '编辑' : '新建'}${meta.title}单`} open={open} onCancel={() => setOpen(false)} onOk={() => form.submit()} destroyOnHidden>
-      <Form form={form} layout="vertical" onFinish={save}>
-        <Form.Item label="仓库" name="warehouseId" rules={[{ required: true }]}><Select options={warehouses.filter(w => !meta.itemType || w.warehouseType === (meta.itemType === 'MATERIAL' ? 'RAW' : 'FG')).map(w => ({ value: w.id, label: `${w.warehouseCode} ${w.name}` }))} onChange={() => { setInventoryByKey({}); form.setFieldValue('lines', (form.getFieldValue('lines') || []).map(() => ({}))); }} /></Form.Item>
-        {(outbound || moving) && watchedWarehouseId && !sourceItemsLoading && !sourceItems.length && <Typography.Text type="warning">该仓库暂无可出库或移库的可用库存。</Typography.Text>}
+    <Modal width={type === 'FINISHED_INBOUND' ? 1120 : 760} title={`${editing ? '编辑' : '新建'}${meta.title}单`} open={open} onCancel={() => setOpen(false)} onOk={() => form.submit()} confirmLoading={saving} destroyOnHidden footer={type === 'FINISHED_INBOUND' ? <Space><Button onClick={() => setOpen(false)}>取消</Button><Button loading={saving} onClick={() => form.validateFields().then(values => save(values, false)).catch(() => undefined)}>保存草稿</Button><Button type="primary" loading={saving} onClick={() => form.validateFields().then(values => save(values, true)).catch(() => undefined)}>保存并提交</Button></Space> : undefined}>
+      <Form form={form} layout="vertical" onFinish={values => save(values, false)}>
+        {type === 'FINISHED_INBOUND' ? <FinishedInboundEditor form={form} items={items} suggestedLocationId={form.getFieldValue('suggestedLocationId')} /> : <>
+        {(outbound || moving) && <Form.Item name="warehouseId" hidden><Input /></Form.Item>}
+        {!(outbound || moving) && (inbound ? <Form.Item name="warehouseId" hidden><Input /></Form.Item> : <Form.Item label="仓库" name="warehouseId" rules={[{ required: true }]}><Select options={warehouses.filter(w => !meta.itemType || w.warehouseType === (meta.itemType === 'MATERIAL' ? 'RAW' : 'FG')).map(w => ({ value: w.id, label: `${w.warehouseCode} ${w.name}` }))} onChange={() => { setInventoryByKey({}); form.setFieldValue('lines', (form.getFieldValue('lines') || []).map(() => ({}))); }} /></Form.Item>)}
         <Form.List name="lines">{(fields, { add, remove: removeLine }) => <>{fields.map(field => <Card size="small" key={field.key} style={{ marginBottom: 10 }}>
-          <Form.Item {...field} label="物料" name={[field.name, 'itemId']} rules={[{ required: true }]}><Select showSearch optionFilterProp="label" loading={(outbound || moving) && sourceItemsLoading} disabled={(outbound || moving) && !watchedWarehouseId} notFoundContent={watchedWarehouseId ? '暂无可用库存物料' : '请先选择仓库'} options={((outbound || moving) ? sourceItems : items).map(i => ({ value: i.itemId || i.id, label: outbound || moving ? `${i.itemCode} ${i.name}｜可用 ${formatQuantity(i.availableQty)} ${i.unit}｜${i.locationCount} 个库位` : `${i.itemCode} ${i.name}` }))} onChange={(itemId) => form.setFieldValue(['lines', field.name], { itemId })} /></Form.Item>
+          <Form.Item {...field} label="物料" name={[field.name, 'itemId']} rules={[{ required: true }]}><Select showSearch optionFilterProp="label" options={((outbound || moving) && sourceScope.warehouseId ? scopedSourceItems : items).map(i => ({ value: i.itemId || i.id, label: `${i.itemCode} ${i.name}` }))} onChange={(itemId) => {
+            const next = [...(form.getFieldValue('lines') || [])];
+            next[field.name] = { itemId, quantity: 1, locationId: undefined, locationDisplay: undefined, batchId: undefined, sourceWarehouseId: undefined, sourceZoneId: undefined, sourceLocationPath: undefined, sourceLocationDisplay: undefined, targetWarehouseId: undefined, targetZoneId: undefined, targetLocationId: undefined, targetLocationPath: undefined, targetLocationDisplay: undefined, targetBatchId: undefined };
+            if (outbound || moving) form.setFieldsValue({ lines: next, warehouseId: sourceWarehouseFromLines(next) });
+            else if (inbound) form.setFieldsValue({ lines: next, warehouseId: next.find((row: any, index: number) => index !== field.name && row?.locationId && row?.warehouseId)?.warehouseId });
+            else form.setFieldValue('lines', next);
+          }} /></Form.Item>
           <Form.Item noStyle shouldUpdate>{({ getFieldValue }) => {
             const warehouseId = getFieldValue('warehouseId');
             const itemId = getFieldValue(['lines', field.name, 'itemId']);
-            const sourcePurpose = moving ? 'MOVE_SOURCE' : outbound ? 'OUTBOUND' : 'INBOUND';
-            const source = itemId && warehouseId ? inventoryByKey[`${warehouseId}:${itemId}:${sourcePurpose}`] : undefined;
+            const source = (outbound || moving) ? sourceDistributions[itemId] : itemId && warehouseId ? inventoryByKey[`${warehouseId}:${itemId}:INBOUND`] : undefined;
             const targetWarehouseId = getFieldValue(['lines', field.name, 'targetWarehouseId']);
             const target = moving && itemId && targetWarehouseId ? inventoryByKey[`${targetWarehouseId}:${itemId}:MOVE_TARGET`] : undefined;
             const sourceBatches = (source?.locations || []).flatMap((location: any) => (location.batches || []).filter((batch: any) => Number(batch.availableQty) > 0).map((batch: any) => ({ ...batch, location })));
             const sourceKey = getFieldValue(['lines', field.name, 'sourceKey']);
             const selectedSourceBatch = sourceBatches.find((batch: any) => `${batch.location.locationId}:${batch.batchId || ''}` === sourceKey);
             const sourceAvailableQty = selectedSourceBatch ? Number(selectedSourceBatch.availableQty) : undefined;
-            const sourceOptions = (outbound || moving)
-              ? sourceBatches.map((batch: any) => ({ value: `${batch.location.locationId}:${batch.batchId || ''}`, batchId: batch.batchId, locationId: batch.location.locationId, label: `${batch.location.zoneCode} / ${batch.location.locationCode}｜批次 ${batch.batchNo || '无'}｜可用 ${formatQuantity(batch.availableQty)}` }))
-              : inbound ? (source?.locations || []).map((location: any) => ({ value: location.locationId, disabled: location.isFull, label: `${location.zoneCode} / ${location.locationCode}｜现存 ${formatQuantity(location.onHandQty)}｜${location.capacityQty === null ? '不限量' : `剩余 ${formatQuantity(location.availableCapacityQty)}`}` }))
-                : locations.filter(location => location.warehouseId === warehouseId).map(location => ({ value: location.id, label: `${location.code} ${location.name}` }));
-            const targetOptions = (target?.locations || []).map((location: any) => ({ value: location.locationId, disabled: location.isFull, label: `${location.zoneCode} / ${location.locationCode}｜现存 ${formatQuantity(location.onHandQty)}｜${location.capacityQty === null ? '不限量' : `剩余 ${formatQuantity(location.availableCapacityQty)}`}` }));
+            const sourceOptions = inbound ? (source?.locations || []).map((location: any) => ({ value: location.locationId, disabled: location.isFull, label: `${locationDisplayName(location)}｜现存 ${formatQuantity(location.onHandQty)}｜${location.capacityQty === null ? '不限量' : `剩余 ${formatQuantity(location.availableCapacityQty)}`}` }))
+                : locations.filter(location => location.warehouseId === warehouseId).map(location => ({ value: location.id, label: locationDisplayName(location) }));
+            const targetOptions = (target?.locations || []).map((location: any) => ({ value: location.locationId, disabled: location.isFull, label: `${locationDisplayName(location)}｜现存 ${formatQuantity(location.onHandQty)}｜${location.capacityQty === null ? '不限量' : `剩余 ${formatQuantity(location.availableCapacityQty)}`}` }));
             const sourceWarehouse = warehouses.find(warehouse => warehouse.id === warehouseId);
             const targetWarehouseOptions = warehouses.filter(warehouse => !sourceWarehouse || warehouse.warehouseType === sourceWarehouse.warehouseType).map(warehouse => ({ value: warehouse.id, label: `${warehouse.warehouseCode} ${warehouse.name}` }));
             const displayed = (outbound || moving) ? sourceBatches : (source?.locations || []);
             return <>
               <Space align="start" wrap>
-                {(outbound || moving) ? <Form.Item {...field} label="来源库位 / 批次" name={[field.name, 'sourceKey']} rules={[{ required: true }]}><Select style={{ width: 310 }} options={sourceOptions} onChange={(_value, option: any) => { form.setFieldValue(['lines', field.name, 'locationId'], option?.locationId); form.setFieldValue(['lines', field.name, 'batchId'], option?.batchId); form.setFieldValue(['lines', field.name, 'quantity'], undefined); if (moving) form.setFieldValue(['lines', field.name, 'targetBatchId'], option?.batchId); }} /></Form.Item> : <><Form.Item {...field} label={inbound ? '入库库位' : '库位'} name={[field.name, 'locationId']} rules={[{ required: true }]}><Select style={{ width: 280 }} options={sourceOptions} /></Form.Item><Form.Item {...field} label="批次（可选）" name={[field.name, 'batchId']}><Select allowClear style={{ width: 180 }} options={batches.filter(b => b.itemId === itemId).map(b => ({ value: b.id, label: b.batchNo }))} /></Form.Item></>}
-                {moving && <><Form.Item {...field} label="目标仓库" name={[field.name, 'targetWarehouseId']} rules={[{ required: true }]}><Select style={{ width: 190 }} options={targetWarehouseOptions} onChange={() => { form.setFieldValue(['lines', field.name, 'targetLocationId'], undefined); form.setFieldValue(['lines', field.name, 'targetBatchId'], undefined); }} /></Form.Item><Form.Item {...field} label="目标库位" name={[field.name, 'targetLocationId']} rules={[{ required: true }]}><Select style={{ width: 280 }} options={targetOptions} /></Form.Item><Form.Item {...field} label="目标批次（可选）" name={[field.name, 'targetBatchId']}><Select allowClear style={{ width: 180 }} options={batches.filter(b => b.itemId === itemId).map(b => ({ value: b.id, label: b.batchNo }))} /></Form.Item></>}
-                <Form.Item {...field} label={adjustment ? '调整数量（正增负减）' : moving ? '移库数量' : inbound ? '入库数量' : '出库数量'} name={[field.name, adjustment ? 'adjustmentQty' : 'quantity']} rules={[{ required: true }, ...((outbound || moving) && sourceAvailableQty !== undefined ? [{ validator: (_rule: any, value: number | undefined) => value !== undefined && Number(value) > sourceAvailableQty ? Promise.reject(new Error(`数量不能超过可用库存 ${formatQuantity(sourceAvailableQty)}`)) : Promise.resolve() }] : [])]}><InputNumber precision={0} min={adjustment ? undefined : 1} max={(outbound || moving) ? sourceAvailableQty : undefined} style={{ width: 180 }} /></Form.Item>
-                {fields.length > 1 && <Button danger onClick={() => removeLine(field.name)}>删除行</Button>}
+                {(outbound || moving) ? <><Form.Item name={[field.name, 'locationId']} hidden rules={[{ required: true, message: moving ? '请先选择移出位置' : '请先选择出库位置' }]}><Input /></Form.Item><Form.Item label={moving ? '源位置' : '出库位置'}>{getFieldValue(['lines', field.name, 'sourceLocationDisplay']) ? <LocationName location={getFieldValue(['lines', field.name, 'sourceLocationDisplay'])}/> : <Typography.Text>{getFieldValue(['lines', field.name, 'sourceLocationPath']) || '请在下方库存分布中选择库位和批次'}</Typography.Text>}</Form.Item></> : inbound ? <><Form.Item name={[field.name, 'locationId']} hidden rules={[{ required: true, message: '请先选择入库位置' }]}><Input /></Form.Item><Form.Item label="入库位置">{getFieldValue(['lines', field.name, 'locationDisplay']) ? <LocationName location={getFieldValue(['lines', field.name, 'locationDisplay'])}/> : <Typography.Text>{getFieldValue(['lines', field.name, 'locationPath']) || '尚未选择入库位置'}</Typography.Text>}<Button style={{ marginLeft: 8 }} disabled={!itemId} onClick={() => setInboundPicker({ index: field.name, itemId })}>{getFieldValue(['lines', field.name, 'locationId']) ? '重新选择入库位置' : '选择入库位置'}</Button></Form.Item><Form.Item {...field} label="批次（可选）" name={[field.name, 'batchId']}><Select allowClear style={{ width: 180 }} options={batches.filter(b => b.itemId === itemId).map(b => ({ value: b.id, label: b.batchNo }))} /></Form.Item></> : <><Form.Item {...field} label="库位" name={[field.name, 'locationId']} rules={[{ required: true }]}><Select style={{ width: 280 }} options={sourceOptions} /></Form.Item><Form.Item {...field} label="批次（可选）" name={[field.name, 'batchId']}><Select allowClear style={{ width: 180 }} options={batches.filter(b => b.itemId === itemId).map(b => ({ value: b.id, label: b.batchNo }))} /></Form.Item></>}
+                {moving && <><Form.Item name={[field.name, 'targetWarehouseId']} hidden rules={[{ required: true, message: '请选择目标库位' }]}><Input /></Form.Item><Form.Item name={[field.name, 'targetLocationId']} hidden rules={[{ required: true, message: '请选择目标库位' }]}><Input /></Form.Item><Form.Item label="目标位置">{getFieldValue(['lines', field.name, 'targetLocationDisplay']) ? <LocationName location={getFieldValue(['lines', field.name, 'targetLocationDisplay'])}/> : <Typography.Text>{getFieldValue(['lines', field.name, 'targetLocationPath']) || '尚未选择目标位置'}</Typography.Text>}<Button style={{ marginLeft: 8 }} disabled={!itemId || !getFieldValue(['lines', field.name, 'locationId'])} onClick={() => setTargetPicker({ index: field.name, itemId })}>选择同类型仓库库位</Button></Form.Item><Form.Item {...field} label="目标批次（可选）" name={[field.name, 'targetBatchId']}><Select allowClear style={{ width: 180 }} options={batches.filter(b => b.itemId === itemId).map(b => ({ value: b.id, label: b.batchNo }))} /></Form.Item></>}
+                <Form.Item {...field} label={adjustment ? '调整数量（正增负减）' : moving ? '移库数量' : inbound ? '入库数量' : '出库数量'} name={[field.name, adjustment ? 'adjustmentQty' : 'quantity']} rules={[{ required: true }, ...((outbound || moving) && sourceAvailableQty !== undefined ? [{ validator: (_rule: any, value: number | undefined) => value !== undefined && Number(value) > sourceAvailableQty ? Promise.reject(new Error(`数量不能超过可用库存 ${formatQuantity(sourceAvailableQty)}`)) : Promise.resolve() }] : []), ...(moving ? [{ validator: (_rule: any, value: number | undefined) => { const remaining = getFieldValue(['lines', field.name, 'targetRemainingCapacityQty']); return value !== undefined && remaining !== null && remaining !== undefined && Number(value) > Number(remaining) ? Promise.reject(new Error(`数量不能超过目标库位剩余容量 ${formatQuantity(remaining)}`)) : Promise.resolve(); } }] : [])]}><InputNumber precision={0} min={adjustment ? undefined : 1} max={(outbound || moving) ? sourceAvailableQty : undefined} style={{ width: 180 }} /></Form.Item>
+                {fields.length > 1 && <Button danger onClick={() => removeDocumentLine(field.name, removeLine)}>删除行</Button>}
               </Space>
               {(inbound || outbound || moving) && itemId && <Table size="small" style={{ marginTop: 8 }} rowKey={(row: any) => row.batchId ? `${row.locationId}-${row.batchId}` : row.locationId} pagination={false} dataSource={displayed} columns={[
-                { title: '库区 / 库位', render: (_: any, row: any) => `${row.location?.zoneCode || row.zoneCode} / ${row.location?.locationCode || row.locationCode}` },
+                { title: '库位', render: (_: any, row: any) => { const location = row.location || row; return <Space direction="vertical" size={0}><LocationName location={location}/><Typography.Text type="secondary">{[location.warehouseName, location.zoneName || location.zoneCode].filter(Boolean).join(' · ')}</Typography.Text></Space>; } },
                 ...(outbound || moving ? [{ title: '批次', dataIndex: 'batchNo', render: (value: any) => value || '无' }] : []),
                 { title: '现存', dataIndex: 'onHandQty', align: 'right', render: formatQuantity },
                 { title: '冻结', dataIndex: 'frozenQty', align: 'right', render: formatQuantity },
                 { title: '已预占', dataIndex: 'reservedQty', align: 'right', render: formatQuantity },
                 { title: outbound || moving ? '可用数量' : '剩余容量', align: 'right', render: (_: any, row: any) => outbound || moving ? formatQuantity(row.availableQty) : row.capacityQty === null ? '不限量' : formatQuantity(row.availableCapacityQty) },
+                ...(outbound || moving ? [{ title: '操作', render: (_: any, row: any) => {
+                  const location = row.location || row;
+                  const key = `${location.locationId}:${row.batchId || ''}`;
+                  const lockedByOtherLine = (getFieldValue('lines') || []).find((line: any, index: number) => index !== field.name && line?.sourceWarehouseId)?.sourceWarehouseId;
+                  const disabled = !location.canSource || (lockedByOtherLine && lockedByOtherLine !== location.warehouseId);
+                  return <Button type={sourceKey === key ? 'primary' : 'link'} disabled={disabled} title={!location.canSource ? '库位已锁定，不能出库或移出' : lockedByOtherLine && lockedByOtherLine !== location.warehouseId ? '本单据已绑定其他来源仓库' : undefined} onClick={() => {
+                    const next = [...(form.getFieldValue('lines') || [])];
+                    const current = next[field.name] || {};
+                    next[field.name] = { ...current, locationId: location.locationId, batchId: row.batchId, sourceKey: key, sourceWarehouseId: location.warehouseId, sourceZoneId: location.zoneId, sourceLocationPath: locationDisplayName(location), sourceLocationDisplay: location, targetWarehouseId: undefined, targetZoneId: undefined, targetLocationId: undefined, targetLocationPath: undefined, targetLocationDisplay: undefined, targetRemainingCapacityQty: undefined, targetBatchId: undefined };
+                    form.setFieldsValue({ lines: next, warehouseId: location.warehouseId });
+                  }}>{sourceKey === key ? '✓ 已选择' : moving ? '从此移出' : '从此出库'}</Button>;
+                } }] : []),
               ]} />}
-              {(outbound || moving) && source && !sourceBatches.length && <Typography.Text type="warning">当前仓库没有该物料可用库存，请更换物料或仓库。</Typography.Text>}
+              {(outbound || moving) && itemId && !source && <Typography.Text type="secondary">正在查询该物料的库存分布……</Typography.Text>}
+              {(outbound || moving) && source && !sourceBatches.length && <Typography.Text type="warning">该物料在当前可操作仓库内暂无可用库存。</Typography.Text>}
               {inbound && source && !(source.locations || []).some((location: any) => !location.isFull) && <Typography.Text type="warning">当前仓库没有可接收入库的库位，请先配置容量或调整库位容量。</Typography.Text>}
             </>;
           }}</Form.Item>
-        </Card>)}<Button block type="dashed" onClick={() => add()}>增加明细</Button></>}</Form.List>
+        </Card>)}<Button block type="dashed" onClick={() => add()}>增加明细</Button></>}</Form.List></>}
         <Form.Item label="备注" name="notes"><Input.TextArea /></Form.Item>
       </Form>
     </Modal>
+    <WarehouseLocationSelector open={!!targetPicker} mode="transfer-target" itemId={targetPicker?.itemId} context={{ warehouseId: targetPicker ? (form.getFieldValue(['lines', targetPicker.index, 'sourceWarehouseId']) || undefined) : undefined, locationId: targetPicker ? (form.getFieldValue(['lines', targetPicker.index, 'locationId']) || undefined) : undefined }} selectedLocationId={targetPicker ? form.getFieldValue(['lines', targetPicker.index, 'targetLocationId']) : undefined} onClose={() => setTargetPicker(undefined)} onConfirm={location => {
+      if (!targetPicker) return;
+      const next = [...(form.getFieldValue('lines') || [])]; const line = next[targetPicker.index] || {};
+      if (line.locationId === location.locationId) { message.error('目标库位不能与源库位相同'); return; }
+      next[targetPicker.index] = { ...line, targetWarehouseId: location.warehouseId, targetZoneId: location.zoneId, targetLocationId: location.locationId, targetRemainingCapacityQty: location.remainingCapacityQty, targetLocationPath: locationDisplayName(location), targetLocationDisplay: location };
+      form.setFieldValue('lines', next); setTargetPicker(undefined);
+    }} />
+    <WarehouseLocationSelector open={!!inboundPicker} mode="inbound" itemId={inboundPicker?.itemId} context={sourceScope} queryScope={{ warehouseId: form.getFieldValue('warehouseId') || undefined }} selectedLocationId={inboundPicker ? form.getFieldValue(['lines', inboundPicker.index, 'locationId']) : undefined} onClose={() => setInboundPicker(undefined)} onConfirm={location => {
+      if (!inboundPicker) return;
+      const next = [...(form.getFieldValue('lines') || [])]; const line = next[inboundPicker.index] || {};
+      const otherWarehouseId = next.find((row: any, index: number) => index !== inboundPicker.index && row?.locationId && row?.warehouseId)?.warehouseId;
+      if (otherWarehouseId && otherWarehouseId !== location.warehouseId) { message.error('同一张入库单只能选择同一仓库库位，请分单创建'); return; }
+      next[inboundPicker.index] = { ...line, warehouseId: location.warehouseId, zoneId: location.zoneId, locationId: location.locationId, locationPath: locationDisplayName(location), locationDisplay: location };
+      form.setFieldsValue({ lines: next, warehouseId: location.warehouseId }); setInboundPicker(undefined);
+    }} />
   </PageScaffold>;
 }
 
@@ -524,7 +626,7 @@ export function UsersV110Page() {
   const [form] = Form.useForm();
   const load = () => Promise.all([api('/users?pageSize=100'), api('/roles')]).then(([users, roleRows]) => { setData(users); setRoles(roleRows); }).catch(fail);
   useEffect(() => { void load(); }, []);
-  const save = async (values: any) => { try { await api(editing ? `/users/${editing.id}` : '/users', { method: editing ? 'PATCH' : 'POST', body: JSON.stringify(values) }); message.success(editing ? '账号已更新' : '账号已创建'); setOpen(false); load(); } catch (error) { fail(error); } };
+  const save = async (values: any) => { try { const updateValues = (({ employeeName, roleId, positionType, managerUserId, departmentName, canApprove }) => ({ employeeName, roleId, positionType, managerUserId, departmentName, canApprove }))(values); await api(editing ? `/users/${editing.id}` : '/users', { method: editing ? 'PATCH' : 'POST', body: JSON.stringify(editing ? updateValues : values) }); message.success(editing ? '账号已更新' : '账号已创建'); setOpen(false); load(); } catch (error) { fail(error); } };
   const toggle = async (record: any) => { try { await api(`/users/${record.id}/status`, { method: 'PATCH', body: JSON.stringify({ status: record.status === 'ACTIVE' ? 'INACTIVE' : 'ACTIVE' }) }); message.success('账号状态已更新'); load(); } catch (error) { fail(error); } };
   const reset = (record: any) => {
     let password = '';

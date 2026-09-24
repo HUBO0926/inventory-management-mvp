@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApartmentOutlined, DatabaseOutlined, DownOutlined, EnvironmentOutlined, FileSearchOutlined, InboxOutlined, LockOutlined, MoreOutlined, PlusOutlined, ReloadOutlined, SearchOutlined, SwapOutlined, UnlockOutlined } from '@ant-design/icons';
 import { Alert, Button, Card, Descriptions, Dropdown, Empty, Form, Input, InputNumber, List, Modal, Progress, Select, Space, Spin, Table, Tag, Timeline, Tooltip, Typography, message } from 'antd';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { api } from './api';
 import { PageScaffold } from './components';
 import { formatBeijingTime, formatQuantity } from './domain';
+import { FinishedInboundEditor } from './finished-inbound-editor';
+import { LocationName, locationDisplayName } from './location-name';
 import type { User } from './App';
 
 export type WarehouseContext =
@@ -13,7 +15,17 @@ export type WarehouseContext =
   | { type:'location';warehouseId:string;zoneId:string;locationId:string }
   | { type:'material';warehouseId:string;zoneId:string;locationId:string;itemId:string;batchId?:string };
 
+/** Shared deep-link contract for warehouse, zone, location and material action entry points. */
+export type OperationContext = WarehouseContext & {
+  warehouseName?: string;
+  zoneName?: string;
+  locationName?: string;
+  itemName?: string;
+  warehouseType?: string;
+};
+
 type Operation='inbound'|'outbound'|'move'|'adjust'|'count';
+const routeOperations=new Set<Operation>(['inbound','outbound','move','count']);
 const stateText:Record<string,string>={DISABLED:'已停用',LOCKED:'作业锁定',FULL:'满库',WARNING:'容量预警',LOW:'低库存',NORMAL:'正常',EMPTY:'空库位',ACTIVE:'启用',INACTIVE:'停用'};
 const stateColor:Record<string,string>={DISABLED:'default',LOCKED:'purple',FULL:'red',WARNING:'orange',LOW:'gold',NORMAL:'green',EMPTY:'blue',ACTIVE:'green',INACTIVE:'default'};
 const managerPermissions=new Set(['stock.view','stock.create','stock.edit','stock.submit','stock.withdraw','stock.move','stock.adjust','stock.count','inventory.view','warehouse.virtual.view','warehouse.capacity.view','warehouse.capacity.manage']);
@@ -24,31 +36,197 @@ const ContextState=({value}:{value:string})=><Tag color={stateColor[value]||'def
 function WarehouseSearch({onPick}:{onPick:(row:any)=>void}){
   const [keyword,setKeyword]=useState(''),[rows,setRows]=useState<any[]>([]),[loading,setLoading]=useState(false);
   useEffect(()=>{if(!keyword.trim()){setRows([]);return;}const timer=window.setTimeout(()=>{setLoading(true);api(`/warehouse-management/search?keyword=${encodeURIComponent(keyword)}`).then(setRows).catch((e:any)=>message.error(e.message)).finally(()=>setLoading(false));},280);return()=>clearTimeout(timer);},[keyword]);
-  return <div className="warehouse-search"><Input allowClear prefix={<SearchOutlined/>} value={keyword} onChange={e=>setKeyword(e.target.value)} placeholder="搜索仓库 / 库区 / 库位 / 物料"/>{(loading||rows.length>0)&&<Card size="small" className="warehouse-search-results">{loading?<Spin size="small"/>:<List size="small" dataSource={rows} renderItem={(row:any)=><List.Item onClick={()=>{onPick(row);setRows([]);setKeyword('');}}><List.Item.Meta title={`${row.code} ${row.name}`} description={`${row.warehouseCode}${row.zoneCode?` / ${row.zoneCode}`:''}${row.locationCode?` / ${row.locationCode}`:''}${row.quantity?` · 库存 ${formatQuantity(row.quantity)} ${row.unit}`:''}`}/></List.Item>}/>}</Card>}</div>;
+  return <div className="warehouse-search"><Input allowClear prefix={<SearchOutlined/>} value={keyword} onChange={e=>setKeyword(e.target.value)} placeholder="搜索仓库 / 库区 / 库位 / 物料"/>{(loading||rows.length>0)&&<Card size="small" className="warehouse-search-results">{loading?<Spin size="small"/>:<List size="small" dataSource={rows} renderItem={(row:any)=><List.Item onClick={()=>{onPick(row);setRows([]);setKeyword('');}}><List.Item.Meta title={row.type==='location'||row.type==='material'?<LocationName location={row}/>:`${row.code} ${row.name}`} description={`${[row.warehouseCode,row.zoneCode].filter(Boolean).join(' · ')}${row.quantity?` · 库存 ${formatQuantity(row.quantity)} ${row.unit}`:''}`}/></List.Item>}/>}</Card>}</div>;
 }
 
 function WarehouseTree({warehouses,zonesByWarehouse,locationsByZone,expandedWarehouses,expandedZones,selected,onExpandWarehouse,onExpandZone,onPick,onAction}:{[key:string]:any}){
   return <div className="warehouse-tree-list">{!warehouses.length?<Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无可查看仓库"/>:warehouses.map((warehouse:any)=><section key={warehouse.id}>
     <div className={`warehouse-tree-row warehouse ${selected?.type==='warehouse'&&selected.warehouseId===warehouse.id?'selected':''}`} onClick={()=>onPick({type:'warehouse',warehouseId:warehouse.id},warehouse)}><button type="button" className="warehouse-tree-toggle" onClick={e=>{e.stopPropagation();onExpandWarehouse(warehouse)}}>{expandedWarehouses.has(warehouse.id)?<DownOutlined/>:<span>›</span>}</button><DatabaseOutlined/><span className="warehouse-tree-main"><strong>{warehouse.name}</strong><small>{warehouse.warehouseCode} · {warehouse.zoneCount} 库区</small></span><Dropdown trigger={['click']} menu={{items:onAction(warehouse,'warehouse')}}><Button onClick={e=>e.stopPropagation()} type="text" icon={<MoreOutlined/>}/></Dropdown></div>
     {expandedWarehouses.has(warehouse.id)&&(zonesByWarehouse[warehouse.id]||[]).map((zone:any)=><div key={zone.id} className="warehouse-tree-branch"><div className={`warehouse-tree-row zone ${selected?.type==='zone'&&selected.zoneId===zone.id?'selected':''}`} onClick={()=>onPick({type:'zone',warehouseId:warehouse.id,zoneId:zone.id},{...zone,warehouseType:warehouse.warehouseType,warehouseCode:warehouse.warehouseCode})}><button type="button" className="warehouse-tree-toggle" onClick={e=>{e.stopPropagation();onExpandZone(zone)}}>{expandedZones.has(zone.id)?<DownOutlined/>:<span>›</span>}</button><ApartmentOutlined/><span className="warehouse-tree-main"><strong>{zone.name}</strong><small>{zone.code} · {zone.locationCount} 库位</small></span>{zone.locked&&<LockOutlined className="tree-lock"/>}<Dropdown trigger={['click']} menu={{items:onAction({...zone,warehouseId:warehouse.id,warehouseType:warehouse.warehouseType},'zone')}}><Button onClick={e=>e.stopPropagation()} type="text" icon={<MoreOutlined/>}/></Dropdown></div>
-      {expandedZones.has(zone.id)&&(locationsByZone[zone.id]||[]).map((item:any)=><div key={item.id} className={`warehouse-tree-row location ${selected?.type==='location'&&selected.locationId===item.id?'selected':''}`} onClick={()=>onPick({type:'location',warehouseId:warehouse.id,zoneId:zone.id,locationId:item.id},{...item,warehouseType:warehouse.warehouseType,warehouseCode:warehouse.warehouseCode,zoneCode:zone.code})}><span className={`warehouse-state-dot ${String(item.state).toLowerCase()}`}/><span className="warehouse-tree-main"><strong>{item.code}</strong><small>{item.itemTypeCount?`${item.itemTypeCount} 物料`:'空库位'} · {stateText[item.state]}</small></span><Dropdown trigger={['click']} menu={{items:onAction({...item,warehouseId:warehouse.id,zoneId:zone.id,warehouseType:warehouse.warehouseType},'location')}}><Button onClick={e=>e.stopPropagation()} type="text" icon={<MoreOutlined/>}/></Dropdown></div>)}</div>)}</section>)}</div>;
+      {expandedZones.has(zone.id)&&(locationsByZone[zone.id]||[]).map((item:any)=><div key={item.id} className={`warehouse-tree-row location ${selected?.type==='location'&&selected.locationId===item.id?'selected':''}`} onClick={()=>onPick({type:'location',warehouseId:warehouse.id,zoneId:zone.id,locationId:item.id},{...item,warehouseType:warehouse.warehouseType,warehouseCode:warehouse.warehouseCode,zoneCode:zone.code})}><span className={`warehouse-state-dot ${String(item.state).toLowerCase()}`}/><span className="warehouse-tree-main"><strong><LocationName location={item}/></strong><small>{item.itemTypeCount?`${item.itemTypeCount} 物料`:'空库位'} · {stateText[item.state]}</small></span><Dropdown trigger={['click']} menu={{items:onAction({...item,warehouseId:warehouse.id,zoneId:zone.id,warehouseType:warehouse.warehouseType},'location')}}><Button onClick={e=>e.stopPropagation()} type="text" icon={<MoreOutlined/>}/></Dropdown></div>)}</div>)}</section>)}</div>;
 }
 
 function ContextHeader({detail,onVirtual}:{detail:any;onVirtual:()=>void}){
   const items=[{key:'code',label:'编码',children:detail.code},{key:'status',label:'状态',children:<ContextState value={detail.lock?'LOCKED':detail.status}/>},{key:'warehouse',label:'所属仓库',children:detail.type==='warehouse'?'—':`${detail.warehouseName||''} ${detail.warehouseCode||''}`},{key:'zone',label:'所属库区',children:detail.type==='location'?`${detail.zoneName} ${detail.zoneCode}`:'—'},{key:'zones',label:'库区 / 库位',children:`${detail.zoneCount||0} / ${detail.locationCount||0}`},{key:'items',label:'物料种类',children:detail.itemTypeCount||0}];
-  return <Card className="warehouse-context-card" title={<Space><span>{detail.name}</span><ContextState value={detail.lock?'LOCKED':detail.status}/></Space>} extra={<Button icon={<DatabaseOutlined/>} onClick={onVirtual}>在虚拟仓库查看</Button>}><Descriptions size="small" column={{xxl:6,xl:4,lg:3,md:2,xs:1}} items={items}/>{detail.lock&&<Alert showIcon type="warning" message={`当前空间已锁定：${detail.lock.reason}`} description={`操作人：${detail.lock.lockedByName||'—'} · ${formatBeijingTime(detail.lock.createdAt)}`}/>}</Card>;
+  return <Card className="warehouse-context-card" title={<Space>{detail.type==='location'?<LocationName location={detail}/>:<span>{detail.name}</span>}<ContextState value={detail.lock?'LOCKED':detail.status}/></Space>} extra={<Button icon={<DatabaseOutlined/>} onClick={onVirtual}>在虚拟仓库查看</Button>}><Descriptions size="small" column={{xxl:6,xl:4,lg:3,md:2,xs:1}} items={items}/>{detail.lock&&<Alert showIcon type="warning" message={`当前空间已锁定：${detail.lock.reason}`} description={`操作人：${detail.lock.lockedByName||'—'} · ${formatBeijingTime(detail.lock.createdAt)}`}/>}</Card>;
 }
 
 function SummaryCards({metrics}:{metrics:any[]}){return <div className="warehouse-summary-grid">{!metrics.length?<Card size="small"><Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无库存统计"/></Card>:metrics.map(row=><Card size="small" key={row.unit} title={`单位：${row.unit}`}><div className="warehouse-metric-row"><span><small>当前库存</small><strong>{formatQuantity(row.onHandQty)}</strong></span><span><small>可用库存</small><strong>{formatQuantity(row.availableQty)}</strong></span><span><small>库存占用</small><strong>{formatQuantity(Number(row.frozenQty||0)+Number(row.reservedQty||0))}</strong></span><span><small>待入库</small><strong>{formatQuantity(row.pendingInboundQty)}</strong></span><span><small>物料种类</small><strong>{row.itemTypeCount||0}</strong></span></div></Card>)}</div>}
 
-function MaterialTable({rows,user,onAction,onCapacity,onRule}:{rows:any[];user?:User;onAction:(kind:Operation,row:any)=>void;onCapacity:(row:any)=>void;onRule:(row:any)=>void}){
-  return <Table className="warehouse-material-table" size="small" rowKey="itemId" dataSource={rows} pagination={false} expandable={{expandedRowRender:(row:any)=><Table size="small" pagination={false} rowKey={(batch:any)=>batch.batchId||'none'} dataSource={row.batches||[]} columns={[{title:'批次',dataIndex:'batchNo',render:(v:any)=>v||'无批次'},{title:'当前库存',dataIndex:'onHandQty',align:'right',render:formatQuantity},{title:'冻结',dataIndex:'frozenQty',align:'right',render:formatQuantity},{title:'出库占用',dataIndex:'reservedQty',align:'right',render:formatQuantity},{title:'可用库存',dataIndex:'availableQty',align:'right',render:formatQuantity},{title:'操作',render:(_:any,batch:any)=><Button type="link" onClick={()=>onAction('move',{...row,...batch})}>移库</Button>} ]}/>}} scroll={{x:1280}} columns={[
-    {title:'物料',width:220,fixed:'left',render:(_:any,row:any)=><span><strong>{row.itemCode}</strong> {row.name}</span>},{title:'型号',dataIndex:'model',width:120,render:(v:any)=>v||'—'},{title:'单位',dataIndex:'unit',width:70},{title:'当前库存',dataIndex:'onHandQty',align:'right',render:formatQuantity},{title:'待出占用',dataIndex:'reservedQty',align:'right',render:formatQuantity},{title:'待入库',dataIndex:'pendingInboundQty',align:'right',render:formatQuantity},{title:'可用库存',dataIndex:'availableQty',align:'right',render:formatQuantity},{title:'容量',dataIndex:'capacityQty',align:'right',render:(v:any)=>v===null?'不限量':formatQuantity(v)},{title:'剩余容量',dataIndex:'remainingCapacityQty',align:'right',render:(v:any)=>v===null?'—':formatQuantity(v)},{title:'使用率',dataIndex:'usageRate',width:120,render:(v:any)=>v===null?'—':<Progress size="small" percent={Math.min(100,Number(v))} status={Number(v)>=100?'exception':'normal'}/>},{title:'状态',width:110,render:(_:any,row:any)=><ContextState value={row.allowed===false?'DISABLED':Number(row.usageRate)>=100?'FULL':Number(row.usageRate)>=80?'WARNING':Number(row.onHandQty)>0&&Number(row.onHandQty)<=Number(row.minimumStock)?'LOW':'NORMAL'}/>},{title:'操作',fixed:'right',width:300,render:(_:any,row:any)=><Space size={0}>{can(user,'stock.create')&&<><Button type="link" onClick={()=>onAction('inbound',row)}>入库</Button><Button type="link" onClick={()=>onAction('outbound',row)}>出库</Button></>}{can(user,'stock.move')&&<Button type="link" onClick={()=>onAction('move',row)}>移库</Button>}{can(user,'stock.adjust')&&<Button type="link" onClick={()=>onAction('adjust',row)}>调整</Button>}<Dropdown menu={{items:[{key:'flow',label:'库存流水',icon:<FileSearchOutlined/>},{key:'capacity',label:'设置容量',disabled:!can(user,'warehouse.capacity.manage')},{key:'rule',label:row.allowed===false?'恢复物料准入':'禁止物料准入',disabled:!can(user,'warehouse.capacity.manage')}],onClick:({key})=>key==='capacity'?onCapacity(row):key==='rule'?onRule(row):onAction('outbound',{...row,flowOnly:true})}}><Button type="link" icon={<MoreOutlined/>}/></Dropdown></Space>}
-  ]}/>;
+function MaterialTable({rows,user,onAction,onCapacity,onRule}:{rows:any[];user?:User;onAction:(kind:Operation,row:any)=>void;onCapacity:(row:any)=>void;onRule:(row:any)=>void}) {
+  const locationState = (row: any) => row.allowed === false ? 'DISABLED' : Number(row.usageRate) >= 100 ? 'FULL' : Number(row.usageRate) >= 80 ? 'WARNING' : Number(row.onHandQty) > 0 && Number(row.onHandQty) <= Number(row.minimumStock) ? 'LOW' : 'NORMAL';
+  return <Table className="warehouse-material-table" size="small" rowKey="itemId" dataSource={rows} pagination={false} scroll={{ x: 1280 }} expandable={{ expandedRowRender: (row: any) => <Table size="small" pagination={false} rowKey={(batch: any) => batch.batchId || 'none'} dataSource={row.batches || []} columns={[
+    { title: '批次', dataIndex: 'batchNo', render: (value: any) => value || '无批次' },
+    { title: '当前库存', dataIndex: 'onHandQty', align: 'right', render: formatQuantity },
+    { title: '冻结', dataIndex: 'frozenQty', align: 'right', render: formatQuantity },
+    { title: '出库占用', dataIndex: 'reservedQty', align: 'right', render: formatQuantity },
+    { title: '可用库存', dataIndex: 'availableQty', align: 'right', render: formatQuantity },
+    { title: '操作', render: (_: any, batch: any) => <Space size={0}>{can(user, 'stock.move') && <Button type="link" onClick={() => onAction('move', { ...row, ...batch })}>移库</Button>}{can(user, 'stock.count') && <Button type="link" onClick={() => onAction('count', { ...row, ...batch })}>盘点</Button>}</Space> },
+  ]} /> }} columns={[
+    { title: '物料', width: 220, fixed: 'left', render: (_: any, row: any) => <span><strong>{row.itemCode}</strong> {row.name}</span> },
+    { title: '型号', dataIndex: 'model', width: 120, render: (value: any) => value || '—' }, { title: '单位', dataIndex: 'unit', width: 70 },
+    { title: '当前库存', dataIndex: 'onHandQty', align: 'right', render: formatQuantity }, { title: '待出占用', dataIndex: 'reservedQty', align: 'right', render: formatQuantity },
+    { title: '待入库', dataIndex: 'pendingInboundQty', align: 'right', render: formatQuantity }, { title: '可用库存', dataIndex: 'availableQty', align: 'right', render: formatQuantity },
+    { title: '容量', dataIndex: 'capacityQty', align: 'right', render: (value: any) => value === null ? '不限量' : formatQuantity(value) },
+    { title: '剩余容量', dataIndex: 'remainingCapacityQty', align: 'right', render: (value: any) => value === null ? '—' : formatQuantity(value) },
+    { title: '使用率', dataIndex: 'usageRate', width: 120, render: (value: any) => value === null ? '—' : <Progress size="small" percent={Math.min(100, Number(value))} status={Number(value) >= 100 ? 'exception' : 'normal'} /> },
+    { title: '状态', width: 110, render: (_: any, row: any) => <ContextState value={locationState(row)} /> },
+    { title: '操作', fixed: 'right', width: 300, render: (_: any, row: any) => <Space size={0}>
+      {can(user, 'stock.create') && <><Button type="link" onClick={() => onAction('inbound', row)}>入库</Button><Button type="link" onClick={() => onAction('outbound', row)}>出库</Button></>}
+      {can(user, 'stock.move') && <Button type="link" onClick={() => onAction('move', row)}>移库</Button>}
+      {can(user, 'stock.count') && <Button type="link" onClick={() => onAction('count', row)}>盘点</Button>}
+      <Dropdown menu={{ items: [{ key: 'flow', label: '库存流水', icon: <FileSearchOutlined /> }, { key: 'capacity', label: '设置容量', disabled: !can(user, 'warehouse.capacity.manage') }, { key: 'rule', label: row.allowed === false ? '恢复物料准入' : '禁止物料准入', disabled: !can(user, 'warehouse.capacity.manage') }], onClick: ({ key }) => key === 'capacity' ? onCapacity(row) : key === 'rule' ? onRule(row) : onAction('outbound', { ...row, flowOnly: true }) }}><Button type="link" icon={<MoreOutlined />} /></Dropdown>
+    </Space> },
+  ]} />;
+}
+
+function FinishedInboundOperationModal({context,detail,seed,onClose,onDone}:{[key:string]:any}) {
+  const [form] = Form.useForm();
+  const [items, setItems] = useState<any[]>([]);
+  const [saving, setSaving] = useState(false);
+  const [draft, setDraft] = useState<any>();
+  const suggestedLocationId = context?.type === 'location' || context?.type === 'material' ? context.locationId : undefined;
+  useEffect(() => {
+    form.resetFields(); setDraft(undefined);
+    form.setFieldsValue({ lines: [{ itemId: seed?.itemId, quantity: 1 }] });
+    api('/items?pageSize=100&status=ACTIVE&itemType=FINISHED_GOOD').then((result: any) => setItems(result.items || [])).catch((error: any) => message.error(error.message));
+  }, [form, seed?.itemId]);
+  const showLineErrors = (error: any) => {
+    const lineErrors = error?.details?.lineErrors || [];
+    if (lineErrors.length) form.setFields(lineErrors.map((row: any) => ({ name: ['lines', row.index, row.field], errors: [row.message] })));
+    message.error(error?.message || '保存失败');
+  };
+  const save = async (submit: boolean) => {
+    setSaving(true);
+    try {
+      const values = await form.validateFields();
+      let document = draft;
+      if (!document) {
+        document = await api('/stock-documents/finished-inbound', { method: 'POST', body: JSON.stringify({ warehouseId: values.warehouseId, notes: values.notes, lines: values.lines.map(({ locationPath, warehouseId: _warehouseId, zoneId: _zoneId, ...line }: any) => ({ ...line, quantity: String(line.quantity) })) }) });
+        setDraft(document);
+      }
+      if (!submit) { message.success(`草稿 ${document.documentNo || ''} 已保存`); onDone(); return; }
+      try { await api(`/stock-documents/${document.id}/submit`, { method: 'POST' }); message.success('单据已创建并提交审批'); onDone(); }
+      catch (error: any) { message.warning(`草稿 ${document.documentNo || document.id} 已保留，提交失败：${error.message}`); }
+    } catch (error: any) { showLineErrors(error); }
+    finally { setSaving(false); }
+  };
+  return <Modal width={1120} title={`成品入库 · ${detail?.name || detail?.code}`} open onCancel={onClose} footer={<Space><Button onClick={onClose}>取消</Button><Button loading={saving} onClick={() => void save(false)}>保存草稿</Button><Button type="primary" loading={saving} onClick={() => void save(true)}>保存并提交</Button></Space>}>
+    <Alert showIcon type="info" message="当前仓储空间仅作为入库位置建议；选择成品后可查看全部有权限成品仓中的库存分布。首个确认库位将确定本单据归属仓库。" />
+    <Form form={form} layout="vertical" className="warehouse-operation-form"><FinishedInboundEditor form={form} items={items} suggestedLocationId={suggestedLocationId} /><Form.Item name="notes" label="备注"><Input.TextArea rows={2} maxLength={500} /></Form.Item></Form>
+  </Modal>;
+}
+
+/** Location-first stock check: every positive stock batch in the selected context is counted once. */
+function StockCheckOperationModal({context,detail,seed,onClose,onDone}:{[key:string]:any}) {
+  const [form] = Form.useForm();
+  const lines = Form.useWatch('lines', form) || [];
+  const [rows, setRows] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [draft, setDraft] = useState<any>();
+  const warehouseId = detail?.type === 'warehouse' ? detail.id : detail?.warehouseId;
+  const fixedZoneId = context?.type === 'zone' || context?.type === 'location' || context?.type === 'material' ? context.zoneId : undefined;
+  const fixedLocationId = context?.type === 'location' || context?.type === 'material' ? context.locationId : undefined;
+  const [selectedZoneId, setSelectedZoneId] = useState<string>();
+  const [selectedLocationId, setSelectedLocationId] = useState<string>();
+  const activeZoneId = fixedZoneId || selectedZoneId;
+  const activeLocationId = fixedLocationId || selectedLocationId;
+  const scope = useMemo(() => ({
+    warehouseId,
+    ...(activeZoneId ? { zoneId: activeZoneId } : {}),
+    ...(activeLocationId ? { locationId: activeLocationId } : {}),
+    ...(seed?.itemId ? { itemId: seed.itemId } : {}),
+  }), [warehouseId, activeZoneId, activeLocationId, seed?.itemId]);
+
+  useEffect(() => { setSelectedZoneId(undefined); setSelectedLocationId(undefined); }, [fixedZoneId, fixedLocationId, warehouseId]);
+
+  useEffect(() => {
+    if (!warehouseId) return;
+    let active = true;
+    setLoading(true); setDraft(undefined); form.resetFields();
+    api(`/stock-documents/stock-check-candidates?${new URLSearchParams(scope)}`)
+      .then((result: any) => {
+        if (!active) return;
+        const candidates = result.lines || [];
+        setRows(candidates);
+        // 实盘数需要操作人逐条确认；不能默认等于账面数。
+        form.setFieldsValue({ lines: activeLocationId ? candidates.map((row: any) => ({
+          locationId: row.locationId,
+          itemId: row.itemId,
+          batchId: row.batchId,
+          countedQty: undefined,
+        })) : [] });
+      })
+      .catch((error: any) => message.error(error.message || '盘点明细加载失败'))
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [form, scope, warehouseId]);
+
+  const save = async (submit: boolean) => {
+    setSaving(true);
+    try {
+      const values = await form.validateFields();
+      let document = draft;
+      if (!document) {
+        document = await api('/stock-documents/stock-check', {
+          method: 'POST',
+          body: JSON.stringify({
+            warehouseId,
+            notes: values.notes,
+            lines: values.lines.map((line: any) => ({ ...line, countedQty: String(line.countedQty) })),
+          }),
+        });
+        setDraft(document);
+      }
+      if (!submit) { message.success(`盘点草稿 ${document.documentNo || ''} 已保存`); onDone(); return; }
+      try {
+        await api(`/stock-documents/${document.id}/submit`, { method: 'POST' });
+        message.success('盘点单已提交审批'); onDone();
+      } catch (error: any) {
+        message.warning(`草稿 ${document.documentNo || document.id} 已保留，提交失败：${error.message}`);
+      }
+    } catch (error: any) {
+      const lineErrors = error?.details?.lineErrors || [];
+      if (lineErrors.length) form.setFields(lineErrors.map((row: any) => ({ name: ['lines', row.index, row.field], errors: [row.message] })));
+      message.error(error?.message || '盘点保存失败');
+    } finally { setSaving(false); }
+  };
+  const hasCounted = (value: any) => value !== undefined && value !== null && value !== '';
+  const incomplete = rows.length > 0 && rows.some((_row, index) => !hasCounted(lines[index]?.countedQty));
+  const evaluatedRows = rows.filter((_row, index) => hasCounted(lines[index]?.countedQty));
+  const differences = evaluatedRows.reduce((total, row) => {
+    const index = rows.indexOf(row);
+    return total + Number(lines[index]?.countedQty) - Number(row.onHandQty);
+  }, 0);
+  const changed = evaluatedRows.filter(row => Number(lines[rows.indexOf(row)]?.countedQty) !== Number(row.onHandQty)).length;
+  const zones = Array.from(new Map(rows.map(row => [row.zoneId, { value: row.zoneId, label: `${row.zoneCode} ${row.zoneName || ''}`.trim() }])).values());
+  const locations = rows.filter(row => !activeZoneId || row.zoneId === activeZoneId).reduce((all: any[], row: any) => all.some(location => location.value === row.locationId) ? all : [...all, { value: row.locationId, label: locationDisplayName(row) }], []);
+  return <Modal width={1120} title={`盘点 · ${detail?.name || detail?.code}`} open onCancel={onClose} destroyOnHidden footer={<Space><Button onClick={onClose}>取消</Button><Button loading={saving} disabled={incomplete || !activeLocationId} onClick={() => void save(false)}>保存草稿</Button><Button type="primary" loading={saving} disabled={incomplete || !activeLocationId} onClick={() => void save(true)}>提交审批</Button></Space>}>
+    <Alert showIcon type="info" message="按库位、物料、批次录入实盘数；所有在当前范围内有正库存的批次均需确认。" />
+    <div className="warehouse-stock-check-summary"><Tag color="blue">盘点批次 {rows.length}</Tag><Tag color={incomplete ? 'default' : changed ? 'orange' : 'green'}>{incomplete ? `待确认 ${rows.length - evaluatedRows.length}` : changed ? `存在差异 ${changed}` : '全部一致'}</Tag><Tag color={differences > 0 ? 'green' : differences < 0 ? 'red' : 'default'}>总差异 {formatQuantity(differences)}</Tag></div>
+    {!fixedZoneId && <Select style={{ width: 260, marginBottom: 12 }} value={selectedZoneId} placeholder="先选择有库存的库区" options={zones} onChange={value => { setSelectedZoneId(value); setSelectedLocationId(undefined); }} />}
+    {!activeLocationId && <Select style={{ width: 320, marginBottom: 12, marginLeft: fixedZoneId ? 0 : 12 }} value={selectedLocationId} placeholder="再选择有库存的库位" disabled={!activeZoneId} options={locations} onChange={setSelectedLocationId} />}
+    {!activeLocationId && <Alert type="warning" showIcon message="请先选择库区和库位，再加载该库位的实盘明细。" style={{ marginBottom: 12 }} />}
+    <Form form={form} layout="vertical">
+      <Form.List name="lines">{fields => <Table className="warehouse-stock-check-table" loading={loading} size="small" rowKey={row => `${row.locationId}:${row.itemId}:${row.batchId || ''}`} pagination={false} scroll={rows.length > 10 ? { y: 420 } : undefined} dataSource={activeLocationId ? rows : []} locale={{ emptyText: activeLocationId ? '当前库位没有可盘点的正库存' : '请先选择库位' }} columns={[
+        { title: '库位', render: (_: any, row: any) => <LocationName location={row} /> },
+        { title: '物料', render: (_: any, row: any) => <><strong>{row.itemCode}</strong> {row.itemName}</> },
+        { title: '型号', dataIndex: 'model', render: (value: any) => value || '—' },
+        { title: '单位', dataIndex: 'unit' },
+        { title: '批次', dataIndex: 'batchNo', render: (value: any) => value || '无批次' },
+        { title: '账面数量', dataIndex: 'onHandQty', align: 'right', render: formatQuantity },
+        { title: '实盘数量', align: 'right', render: (_: any, _row: any, index: number) => <><Form.Item name={[index, 'locationId']} hidden><Input /></Form.Item><Form.Item name={[index, 'itemId']} hidden><Input /></Form.Item><Form.Item name={[index, 'batchId']} hidden><Input /></Form.Item><Form.Item name={[index, 'countedQty']} rules={[{ required: true, message: '请输入实盘数量' }]} style={{ margin: 0 }}><InputNumber min={0} precision={0} style={{ width: 120 }} /></Form.Item></> },
+        { title: '差异', align: 'right', render: (_: any, row: any, index: number) => { if (!hasCounted(lines[index]?.countedQty)) return '待录入'; const value = Number(lines[index]?.countedQty) - Number(row.onHandQty); return <span className={value > 0 ? 'positive' : value < 0 ? 'negative' : ''}>{value > 0 ? '+' : ''}{formatQuantity(value)}</span>; } },
+        { title: '结果', render: (_: any, row: any, index: number) => { if (!hasCounted(lines[index]?.countedQty)) return <Tag>待盘点</Tag>; const value = Number(lines[index]?.countedQty) - Number(row.onHandQty); return <Tag color={value === 0 ? 'green' : value > 0 ? 'blue' : 'orange'}>{value === 0 ? '一致' : value > 0 ? '盘盈' : '盘亏'}</Tag>; } },
+      ]} />}</Form.List>
+      <Form.Item name="notes" label="备注" style={{ marginTop: 12 }}><Input.TextArea rows={2} maxLength={500} /></Form.Item>
+    </Form>
+  </Modal>;
 }
 
 function OperationModal({open,context,detail,seed,user,onClose,onDone,loadWarehouseLocations}:{[key:string]:any}){
-  const [form]=Form.useForm(),watchedLines=Form.useWatch('lines',form)||[],[items,setItems]=useState<any[]>([]),[inventoryRows,setInventoryRows]=useState<any[]>([]),[locations,setLocations]=useState<any[]>([]),[targetWarehouses,setTargetWarehouses]=useState<any[]>([]),[targetLocations,setTargetLocations]=useState<any[]>([]),[preview,setPreview]=useState<any>(),[saving,setSaving]=useState(false);const operation:Operation=open;
+  const [form]=Form.useForm(),sourceLocationId=Form.useWatch('locationId',form),watchedLines=Form.useWatch('lines',form)||[],[items,setItems]=useState<any[]>([]),[inventoryRows,setInventoryRows]=useState<any[]>([]),[locations,setLocations]=useState<any[]>([]),[targetWarehouses,setTargetWarehouses]=useState<any[]>([]),[targetLocations,setTargetLocations]=useState<any[]>([]),[preview,setPreview]=useState<any>(),[saving,setSaving]=useState(false);const operation:Operation=open;
   const warehouseId=detail?.type==='warehouse'?detail.id:detail?.warehouseId;const warehouseType=detail?.warehouseType;
   useEffect(()=>{if(!open)return;const fixedLocation=context?.type==='location'||context?.type==='material'?context.locationId:undefined;setPreview(undefined);setInventoryRows([]);form.resetFields();form.setFieldsValue({warehouseId,locationId:fixedLocation,targetWarehouseId:warehouseId,lines:[{itemId:seed?.itemId,quantity:1,batchId:seed?.batchId,countedQty:seed?.onHandQty}]});Promise.all([api(`/items?pageSize=100&status=ACTIVE${warehouseType==='RAW'?'&itemType=MATERIAL':warehouseType==='FG'?'&itemType=FINISHED_GOOD':''}`),api('/warehouse-management/warehouses'),loadWarehouseLocations(warehouseId),fixedLocation?api(`/warehouse-management/locations/${fixedLocation}/materials?pageSize=100`):Promise.resolve({items:[]})]).then(([i,w,l,inventory]:any[])=>{const scoped=context?.type==='zone'?l.filter((row:any)=>row.zoneId===context.zoneId):l;setItems(i.items||[]);setTargetWarehouses((w||[]).filter((row:any)=>row.warehouseType===warehouseType));setLocations(scoped);setTargetLocations(l);setInventoryRows(inventory.items||[]);if(operation==='count'&&fixedLocation){const countLines=(inventory.items||[]).flatMap((item:any)=>item.batches?.length?item.batches.map((batch:any)=>({itemId:item.itemId,batchId:batch.batchId,countedQty:Number(batch.onHandQty)})):[{itemId:item.itemId,countedQty:Number(item.onHandQty)}]);if(countLines.length)form.setFieldValue('lines',countLines);}}).catch((e:any)=>message.error(e.message));},[open,warehouseId,seed?.itemId,seed?.batchId]);
   if(!open)return null;
@@ -62,14 +240,14 @@ function OperationModal({open,context,detail,seed,user,onClose,onDone,loadWareho
   const title={inbound:'入库',outbound:'出库',move:'移库',adjust:'库存调整',count:'盘点'}[operation];
   return <Modal width={960} title={`${title} · ${detail?.name||detail?.code}`} open onCancel={onClose} footer={<Space><Button onClick={onClose}>取消</Button><Button loading={saving} onClick={()=>void save(false)}>保存草稿</Button><Button type="primary" loading={saving} onClick={()=>void save(true)}>提交审批</Button></Space>}>
     <Alert showIcon type="info" message={`已按当前${detail?.type==='warehouse'?'仓库':detail?.type==='zone'?'库区':'库位'}限定操作范围；最终库存事务仍明确到具体库位。`}/>
-    <Form form={form} layout="vertical" className="warehouse-operation-form"><div className="warehouse-operation-context"><Form.Item name="warehouseId" label="仓库"><Input disabled value={detail?.warehouseName||detail?.name}/></Form.Item><Form.Item name="locationId" label={operation==='move'||operation==='outbound'?'源库位':'库位'} rules={[{required:operation!=='inbound'||context?.type==='location'}]}><Select allowClear disabled={context?.type==='location'||context?.type==='material'} options={locations.map((l:any)=>({value:l.id,label:`${l.zoneCode} / ${l.code}`}))} onChange={async id=>{if(!id)return setInventoryRows([]);const data=await api(`/warehouse-management/locations/${id}/materials?pageSize=100`);setInventoryRows(data.items||[]);if(operation==='count'){const lines=(data.items||[]).flatMap((item:any)=>item.batches?.length?item.batches.map((batch:any)=>({itemId:item.itemId,batchId:batch.batchId,countedQty:Number(batch.onHandQty)})):[{itemId:item.itemId,countedQty:Number(item.onHandQty)}]);form.setFieldValue('lines',lines.length?lines:[{}]);}}}/></Form.Item>{operation==='move'&&<><Form.Item name="targetWarehouseId" label="目标仓库" rules={[{required:true}]}><Select options={targetWarehouses.map((w:any)=>({value:w.id,label:`${w.warehouseCode} ${w.name}`}))} onChange={targetWarehouse}/></Form.Item><Form.Item name="targetLocationId" label="目标库位"><Select allowClear options={targetLocations.map((l:any)=>({value:l.id,label:`${l.zoneCode} / ${l.code}`}))}/></Form.Item></>}</div>
+    <Form form={form} layout="vertical" className="warehouse-operation-form"><div className="warehouse-operation-context"><Form.Item name="warehouseId" label="仓库"><Input disabled value={detail?.warehouseName||detail?.name}/></Form.Item><Form.Item name="locationId" label={operation==='move'||operation==='outbound'?'源库位':'库位'} rules={[{required:operation!=='inbound'||context?.type==='location'}]}><Select allowClear disabled={context?.type==='location'||context?.type==='material'} options={locations.map((l:any)=>({value:l.id,label:`${l.zoneCode} / ${l.code}`}))} onChange={async id=>{if(form.getFieldValue('targetLocationId')===id)form.setFieldValue('targetLocationId',undefined);if(!id)return setInventoryRows([]);const data=await api(`/warehouse-management/locations/${id}/materials?pageSize=100`);setInventoryRows(data.items||[]);if(operation==='count'){const lines=(data.items||[]).flatMap((item:any)=>item.batches?.length?item.batches.map((batch:any)=>({itemId:item.itemId,batchId:batch.batchId,countedQty:Number(batch.onHandQty)})):[{itemId:item.itemId,countedQty:Number(item.onHandQty)}]);form.setFieldValue('lines',lines.length?lines:[{}]);}}}/></Form.Item>{operation==='move'&&<><Form.Item name="targetWarehouseId" label="目标仓库（可为当前仓库）" rules={[{required:true}]}><Select options={targetWarehouses.map((w:any)=>({value:w.id,label:`${w.warehouseCode} ${w.name}`}))} onChange={targetWarehouse}/></Form.Item><Form.Item name="targetLocationId" label="目标库位" rules={[{required:true,message:'请选择目标库位'}]}><Select allowClear options={targetLocations.filter((l:any)=>l.id!==sourceLocationId).map((l:any)=>({value:l.id,label:`${l.zoneCode} / ${l.code}`}))}/></Form.Item></>}</div>
       <Form.List name="lines">{(fields,{add,remove})=><>{fields.map(field=><Space key={field.key} align="baseline" className="warehouse-operation-line"><Form.Item {...field} name={[field.name,'itemId']} label="物料" rules={[{required:true}]}><Select showSearch optionFilterProp="label" style={{width:300}} disabled={Boolean(seed?.itemId)||(operation==='count'&&Boolean(watchedLines[field.name]?.itemId))} options={items.map((i:any)=>({value:i.id,label:`${i.itemCode} ${i.name} (${i.unit})`}))}/></Form.Item>{operation==='count'&&<Form.Item {...field} name={[field.name,'batchId']} label="批次"><Select allowClear style={{width:150}} disabled={Boolean(watchedLines[field.name]?.batchId)} options={(inventoryRows.find((item:any)=>item.itemId===watchedLines[field.name]?.itemId)?.batches||[]).map((batch:any)=>({value:batch.batchId,label:batch.batchNo||'无批次'}))}/></Form.Item>}{operation==='adjust'?<Form.Item {...field} name={[field.name,'adjustmentQty']} label="调整数量（可负）" rules={[{required:true}]}><InputNumber precision={0}/></Form.Item>:operation==='count'?<Form.Item {...field} name={[field.name,'countedQty']} label="实盘数量" rules={[{required:true}]}><InputNumber min={0} precision={0}/></Form.Item>:<Form.Item {...field} name={[field.name,'quantity']} label="数量" rules={[{required:true}]}><InputNumber min={1} precision={0}/></Form.Item>}<Button danger type="text" disabled={fields.length===1} onClick={()=>remove(field.name)}>移除</Button></Space>)}<Button block type="dashed" icon={<PlusOutlined/>} onClick={()=>add({quantity:1})}>增加明细</Button></>}</Form.List><Form.Item name="notes" label="备注"><Input.TextArea rows={2} maxLength={500}/></Form.Item>
     </Form>{['inbound','outbound','move'].includes(operation)&&<Button icon={<SwapOutlined/>} onClick={previewAllocation}>自动分配预览</Button>}{preview&&<><Alert showIcon type="warning" message="可调整分配数量；保存或提交时会重新校验库存、占用、容量、准入和作业锁。"/><Table size="small" pagination={false} rowKey="clientKey" dataSource={preview.allocations} columns={[{title:'物料',dataIndex:'itemId',ellipsis:true},{title:'数量',dataIndex:'quantity',render:(value:any,row:any)=><InputNumber min={1} precision={0} value={Number(value)} onChange={next=>editPreview(row.clientKey,next)}/>},{title:operation==='inbound'?'目标库位':operation==='outbound'?'出库库位':'源库位',dataIndex:'locationId',render:(value:any)=>locations.find((row:any)=>row.id===value)?.code||targetLocations.find((row:any)=>row.id===value)?.code||value},{title:'源可用量',render:(_:any,row:any)=>row.sourceBeforeQty===undefined?'—':`${formatQuantity(row.sourceBeforeQty)} → ${formatQuantity(Number(row.sourceBeforeQty)-Number(row.quantity))}`},{title:'目标库存',render:(_:any,row:any)=>row.targetBeforeQty===undefined?'—':`${formatQuantity(row.targetBeforeQty)} → ${formatQuantity(Number(row.targetBeforeQty)+Number(row.quantity))}`},{title:'目标容量',dataIndex:'capacityQty',render:(value:any)=>value===null?'不限量':value===undefined?'—':formatQuantity(value)},{title:'类型',dataIndex:'moveCategory',render:(v:any)=>v==='TRANSFER_WAREHOUSE'?'跨仓调拨':v?'库内移库':'自动分配'}]}/></>}</Modal>;
 }
 
 export function WarehouseManagementPage({user}:{user?:User}){
   const nav=useNavigate(),route=useLocation(),query=useMemo(()=>new URLSearchParams(route.search),[route.search]);
-  const [warehouses,setWarehouses]=useState<any[]>([]),[zonesByWarehouse,setZonesByWarehouse]=useState<Record<string,any[]>>({}),[locationsByZone,setLocationsByZone]=useState<Record<string,any[]>>({}),[expandedWarehouses,setExpandedWarehouses]=useState(new Set<string>()),[expandedZones,setExpandedZones]=useState(new Set<string>()),[selected,setSelected]=useState<WarehouseContext>(),[selectedNode,setSelectedNode]=useState<any>(),[detail,setDetail]=useState<any>(),[materials,setMaterials]=useState<any[]>([]),[activity,setActivity]=useState<any[]>([]),[loading,setLoading]=useState(true),[operation,setOperation]=useState<Operation>(),[seed,setSeed]=useState<any>(),[capacity,setCapacity]=useState<any>(),[capacityForm]=Form.useForm();
+  const [warehouses,setWarehouses]=useState<any[]>([]),[zonesByWarehouse,setZonesByWarehouse]=useState<Record<string,any[]>>({}),[locationsByZone,setLocationsByZone]=useState<Record<string,any[]>>({}),[expandedWarehouses,setExpandedWarehouses]=useState(new Set<string>()),[expandedZones,setExpandedZones]=useState(new Set<string>()),[selected,setSelected]=useState<WarehouseContext>(),[selectedNode,setSelectedNode]=useState<any>(),[detail,setDetail]=useState<any>(),[materials,setMaterials]=useState<any[]>([]),[activity,setActivity]=useState<any[]>([]),[loading,setLoading]=useState(true),[operation,setOperation]=useState<Operation>(),[seed,setSeed]=useState<any>(),[capacity,setCapacity]=useState<any>(),[capacityForm]=Form.useForm(),openedOperation=useRef<string|undefined>(undefined);
   const loadZones=useCallback(async(warehouseId:string)=>{const rows=await api(`/warehouse-management/warehouses/${warehouseId}/zones`);setZonesByWarehouse(v=>({...v,[warehouseId]:rows}));return rows;},[]);
   const loadLocations=useCallback(async(zoneId:string)=>{const rows=await api(`/warehouse-management/zones/${zoneId}/locations`);setLocationsByZone(v=>({...v,[zoneId]:rows}));return rows;},[]);
   const loadWarehouseLocations=useCallback(async(warehouseId:string)=>{const zones=zonesByWarehouse[warehouseId]||await loadZones(warehouseId);const groups=await Promise.all(zones.map((z:any)=>locationsByZone[z.id]||loadLocations(z.id)));return groups.flat().map((l:any,i:number)=>({...l,zoneCode:zones.find((z:any)=>z.id===l.zoneId)?.code||groups.flat()[i]?.zoneCode}));},[zonesByWarehouse,locationsByZone,loadZones,loadLocations]);
@@ -77,10 +255,11 @@ export function WarehouseManagementPage({user}:{user?:User}){
   const pick=useCallback(async(context:WarehouseContext,node:any,changeUrl=true)=>{setSelected(context);setSelectedNode(node);if(changeUrl)updateUrl(context,node);const type=context.type==='material'?'location':context.type,id=contextId(context);try{const [d,a,m]=await Promise.all([api(`/warehouse-management/context/${type}/${id}`),api(`/warehouse-management/activity?contextType=${type}&contextId=${id}&pageSize=12`),type==='location'?api(`/warehouse-management/locations/${id}/materials?pageSize=100`):Promise.resolve({items:[]})]);setDetail(d);setActivity(a);setMaterials(m.items||[]);}catch(e:any){message.error(e.message);}},[warehouses]);
   const load=useCallback(async()=>{setLoading(true);try{const rows=await api('/warehouse-management/warehouses');setWarehouses(rows);if(!rows.length)return;const target=rows.find((w:any)=>w.warehouseCode===query.get('warehouse'))||rows[0];setExpandedWarehouses(new Set([target.id]));const zones=await loadZones(target.id);const zone=zones.find((z:any)=>z.code===query.get('zone'));if(zone){setExpandedZones(new Set([zone.id]));const locations=await loadLocations(zone.id);const location=locations.find((l:any)=>l.code===query.get('location'));if(location)await pick({type:'location',warehouseId:target.id,zoneId:zone.id,locationId:location.id},{...location,warehouseCode:target.warehouseCode,warehouseType:target.warehouseType,zoneCode:zone.code},false);else await pick({type:'zone',warehouseId:target.id,zoneId:zone.id},{...zone,warehouseCode:target.warehouseCode,warehouseType:target.warehouseType},false);}else await pick({type:'warehouse',warehouseId:target.id},target,false);}catch(e:any){message.error(e.message);}finally{setLoading(false);}},[query.toString()]);
   useEffect(()=>{void load();const refresh=()=>void load();window.addEventListener('inventory:refresh',refresh);window.addEventListener('focus',refresh);return()=>{window.removeEventListener('inventory:refresh',refresh);window.removeEventListener('focus',refresh);};},[]);
+  useEffect(()=>{const requested=query.get('operation') as Operation|null,key=route.search;if(!requested||!routeOperations.has(requested)||openedOperation.current===key||!detail||!selected)return;openedOperation.current=key;const permission=requested==='move'?'stock.move':requested==='count'?'stock.count':'stock.create';if(!can(user,permission)){message.warning('当前账号没有该库存操作权限');return;}if(detail.warehouseType==='DEFECTIVE'){nav('/approvals?businessType=DEFECTIVE');return;}if(requested==='outbound'&&detail.warehouseType==='RAW'){nav('/production/tasks');message.info('原材料出库沿用生产领料流程');return;}setSeed(undefined);setOperation(requested);},[detail,selected,route.search,query,user]);
   const expandWarehouse=async(w:any)=>{const next=new Set(expandedWarehouses);if(next.has(w.id))next.delete(w.id);else{next.add(w.id);if(!zonesByWarehouse[w.id])await loadZones(w.id);}setExpandedWarehouses(next);};
   const expandZone=async(z:any)=>{const next=new Set(expandedZones);if(next.has(z.id))next.delete(z.id);else{next.add(z.id);if(!locationsByZone[z.id])await loadLocations(z.id);}setExpandedZones(next);};
   const locate=async(row:any)=>{const warehouse=warehouses.find(w=>w.id===row.warehouseId);if(!warehouse)return;setExpandedWarehouses(v=>new Set(v).add(row.warehouseId));const zones=zonesByWarehouse[row.warehouseId]||await loadZones(row.warehouseId);const zone=zones.find((z:any)=>z.id===row.zoneId);if(row.zoneId){setExpandedZones(v=>new Set(v).add(row.zoneId));if(!locationsByZone[row.zoneId])await loadLocations(row.zoneId);}const context:WarehouseContext=row.locationId?{type:'location',warehouseId:row.warehouseId,zoneId:row.zoneId,locationId:row.locationId}:row.zoneId?{type:'zone',warehouseId:row.warehouseId,zoneId:row.zoneId}:{type:'warehouse',warehouseId:row.warehouseId};await pick(context,{...row,warehouseType:warehouse.warehouseType,warehouseCode:warehouse.warehouseCode,zoneCode:zone?.code,code:row.locationCode||row.zoneCode||row.warehouseCode,name:row.name});};
-  const start=(kind:Operation,row?:any)=>{if(row?.flowOnly){nav(`/inventory/management?tab=flows&warehouseId=${selected?.warehouseId}&locationId=${selected&&'locationId'in selected?selected.locationId:''}&itemId=${row.itemId||''}`);return;}if(detail?.warehouseType==='DEFECTIVE'){nav('/approvals?businessType=DEFECTIVE');return;}if(kind==='outbound'&&detail?.warehouseType==='RAW'){nav('/production/tasks');message.info('原材料出库沿用生产领料流程');return;}setSeed(row);setOperation(kind);};
+  const start=(kind:Operation,row?:any)=>{if(row?.flowOnly){nav(`/inventory/management?tab=flows&warehouseId=${selected?.warehouseId}&locationId=${selected&&'locationId'in selected?selected.locationId:''}&itemId=${row.itemId||''}`);return;}if(detail?.warehouseType==='DEFECTIVE'){nav('/approvals?businessType=DEFECTIVE');return;}if(kind==='outbound'&&detail?.warehouseType==='RAW'){nav('/production/tasks');message.info('原材料出库沿用生产领料流程');return;}if(['inbound','outbound','move'].includes(kind)){const p=new URLSearchParams({new:'1',warehouseId:selected?.warehouseId||detail?.warehouseId||detail?.id||''});if(selected?.type==='zone'||selected?.type==='location'||selected?.type==='material')p.set('zoneId',selected.zoneId);if(selected?.type==='location'||selected?.type==='material')p.set('locationId',selected.locationId);if(row?.itemId)p.set('itemId',row.itemId);const path=kind==='inbound'?(detail?.warehouseType==='FG'?'/finished-inbound':'/inbound'):kind==='outbound'?'/outbound':'/moves';nav(`${path}?${p}`);return;}setSeed(row);setOperation(kind);};
   const actions=(node:any,level:string)=>[{key:'inbound',label:'入库',hidden:node.warehouseType==='DEFECTIVE'||!can(user,'stock.create')},{key:'outbound',label:node.warehouseType==='RAW'?'生产领料':'出库',hidden:node.warehouseType==='DEFECTIVE'||!can(user,'stock.create')},{key:'move',label:'移库',hidden:node.warehouseType==='DEFECTIVE'||!can(user,'stock.move')},{type:'divider' as const},{key:'flow',label:'库存流水'},{key:'virtual',label:'在虚拟仓库查看'}].filter((item:any)=>!item.hidden).map(item=>({...item,onClick:item.key==='flow'?()=>nav(`/inventory/management?tab=flows&warehouseId=${node.warehouseId||node.id}`):item.key==='virtual'?()=>nav(`/virtual-warehouse?warehouse=${node.warehouseCode||''}&zone=${node.zoneCode||node.code||''}&location=${level==='location'?node.code:''}`):item.key&&!('type'in item)?()=>start(item.key as Operation):undefined}));
   const virtual=()=>{const warehouse=warehouses.find(w=>w.id===selected?.warehouseId);nav(`/virtual-warehouse?warehouse=${warehouse?.warehouseCode||detail?.warehouseCode||''}&zone=${detail?.zoneCode||''}&location=${detail?.type==='location'?detail.code:''}`);};
   const moreItems=[{key:'adjust',label:'库存调整',hidden:!can(user,'stock.adjust')||detail?.warehouseType==='DEFECTIVE'},{key:'capacity',label:'设置容量',hidden:selected?.type!=='location'||!can(user,'warehouse.capacity.manage')},{key:'lock',label:detail?.lock?'解冻':'冻结',hidden:!can(user,'stock.freeze'),icon:detail?.lock?<UnlockOutlined/>:<LockOutlined/>},{type:'divider' as const},{key:'flow',label:'查看库存流水'},{key:'document',label:'查看库存单据'},{key:'edit',label:'编辑信息',hidden:!can(user,'master.manage')}].filter((item:any)=>!item.hidden);
@@ -91,8 +270,12 @@ export function WarehouseManagementPage({user}:{user?:User}){
   return <PageScaffold title="仓库管理" subtitle="统一管理仓库、库区、库位及库存操作；所有变更均通过库存单据和审批过账。" extra={<Space><Button icon={<ReloadOutlined/>} loading={loading} onClick={()=>void load()}>刷新</Button>{can(user,'master.manage')&&<Button type="primary" icon={<PlusOutlined/>} onClick={()=>nav('/warehouse-archive?create=1')}>新增仓库</Button>}</Space>}>
     <div className="warehouse-workbench"><Card className="warehouse-tree-card" title="仓储空间"><WarehouseSearch onPick={locate}/><WarehouseTree {...{warehouses,zonesByWarehouse,locationsByZone,expandedWarehouses,expandedZones,selected}} onExpandWarehouse={expandWarehouse} onExpandZone={expandZone} onPick={pick} onAction={actions}/></Card>
       <main className="warehouse-workbench-detail">{!detail?<Card loading={loading}><Empty description="请选择仓储空间"/></Card>:<><ContextHeader detail={detail} onVirtual={virtual}/><Card size="small" className="warehouse-action-card"><Space wrap>{detail.warehouseType==='DEFECTIVE'?<Button onClick={()=>nav('/approvals?businessType=DEFECTIVE')}>不良品处理</Button>:<>{can(user,'stock.create')&&<><Button type="primary" icon={<InboxOutlined/>} onClick={()=>start('inbound')}>入库</Button><Button onClick={()=>start('outbound')}>{detail.warehouseType==='RAW'?'生产领料':'出库'}</Button></>}{can(user,'stock.move')&&<Button icon={<SwapOutlined/>} onClick={()=>start('move')}>移库</Button>}{can(user,'stock.count')&&<Button onClick={()=>start('count')}>盘点</Button>}</>}<Dropdown menu={{items:moreItems,onClick:onMore}}><Button>更多 <DownOutlined/></Button></Dropdown></Space></Card><SummaryCards metrics={detail.metricsByUnit||[]}/>
-        {detail.alerts?.length>0&&<Alert showIcon type="warning" message={`当前仓库有 ${detail.alerts.length} 条库存风险`} description={detail.alerts.slice(0,3).map((a:any)=><div key={a.id}>{a.message}</div>)}/>}<Card className="warehouse-content-card" title={detail.type==='location'?'库位物料库存':detail.type==='warehouse'?'库区列表':'库位列表'}>{detail.type==='location'?<MaterialTable rows={materials} user={user} onAction={start} onCapacity={(row:any)=>{setCapacity(row);capacityForm.setFieldsValue({capacity:row.capacityQty?Number(row.capacityQty):undefined});}} onRule={rule}/>:<Table size="small" rowKey="id" pagination={false} dataSource={childRows} columns={[{title:detail.type==='warehouse'?'库区':'库位',render:(_:any,row:any)=><Button type="link" onClick={()=>detail.type==='warehouse'?pick({type:'zone',warehouseId:detail.id,zoneId:row.id},{...row,warehouseCode:detail.code,warehouseType:detail.warehouseType}):pick({type:'location',warehouseId:detail.warehouseId,zoneId:detail.id,locationId:row.id},{...row,warehouseCode:detail.warehouseCode,warehouseType:detail.warehouseType,zoneCode:detail.code})}>{row.name} ({row.code})</Button>},{title:'状态',render:(_:any,row:any)=><ContextState value={row.state||row.status}/>},{title:'物料种类',dataIndex:'itemTypeCount'},{title:'库位数量',dataIndex:'locationCount',render:(v:any)=>v??'—'},{title:'当前库存',render:()=> '按单位见上方'}]}/>}</Card><Card title="最近库存动态" extra={<Button type="link" onClick={()=>nav(`/inventory/management?tab=flows&warehouseId=${selected?.warehouseId}`)}>查看全部流水</Button>}><Timeline items={activity.map((row:any)=>({color:row.direction==='MOVE'?'blue':Number(row.deltaQty)>0?'green':'red',children:<div><strong>{formatBeijingTime(row.createdAt)} · {row.operator}</strong><p>{row.itemCode} {row.itemName} {row.direction==='MOVE'?`移库 ${formatQuantity(row.deltaQty)}`:`${Number(row.deltaQty)>0?'入库':'出库'} ${formatQuantity(Math.abs(Number(row.deltaQty)))}`} {row.unit}</p><Typography.Text type="secondary">{row.direction==='MOVE'?`${row.sourcePath} → ${row.targetPath}`:`${row.warehouseCode} / ${row.zoneCode} / ${row.locationCode}`} · {row.documentNo}</Typography.Text></div>}))}/>{!activity.length&&<Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无库存动态"/>}</Card></>}</main></div>
-    <OperationModal open={operation} context={selected} detail={detail} seed={seed} user={user} onClose={()=>setOperation(undefined)} onDone={()=>{setOperation(undefined);void load();window.dispatchEvent(new Event('inventory:refresh'));}} loadWarehouseLocations={loadWarehouseLocations}/>
+          {detail.alerts?.length>0&&<Alert showIcon type="warning" message={`当前仓库有 ${detail.alerts.length} 条库存风险`} description={detail.alerts.slice(0,3).map((a:any)=><div key={a.id}>{a.message}</div>)}/>}<Card className="warehouse-content-card" title={detail.type==='location'?'库位物料库存':detail.type==='warehouse'?'库区列表':'库位列表'}>{detail.type==='location'?<MaterialTable rows={materials} user={user} onAction={start} onCapacity={(row:any)=>{setCapacity(row);capacityForm.setFieldsValue({capacity:row.capacityQty?Number(row.capacityQty):undefined});}} onRule={rule}/>:<Table size="small" rowKey="id" pagination={false} dataSource={childRows} columns={[{title:detail.type==='warehouse'?'库区':'库位',render:(_:any,row:any)=><Button type="link" onClick={()=>detail.type==='warehouse'?pick({type:'zone',warehouseId:detail.id,zoneId:row.id},{...row,warehouseCode:detail.code,warehouseType:detail.warehouseType}):pick({type:'location',warehouseId:detail.warehouseId,zoneId:detail.id,locationId:row.id},{...row,warehouseCode:detail.warehouseCode,warehouseType:detail.warehouseType,zoneCode:detail.code})}>{detail.type==='warehouse'?`${row.name} (${row.code})`:<LocationName location={row}/>}</Button>},{title:'状态',render:(_:any,row:any)=><ContextState value={row.state||row.status}/>},{title:'物料种类',dataIndex:'itemTypeCount'},{title:'库位数量',dataIndex:'locationCount',render:(v:any)=>v??'—'},{title:'当前库存',render:()=> '按单位见上方'}]}/>}</Card><Card title="最近库存动态" extra={<Button type="link" onClick={()=>nav(`/inventory/management?tab=flows&warehouseId=${selected?.warehouseId}`)}>查看全部流水</Button>}><Timeline items={activity.map((row:any)=>({color:row.direction==='MOVE'?'blue':Number(row.deltaQty)>0?'green':'red',children:<div><strong>{formatBeijingTime(row.createdAt)} · {row.operator}</strong><p>{row.itemCode} {row.itemName} {row.direction==='MOVE'?`移库 ${formatQuantity(row.deltaQty)}`:`${Number(row.deltaQty)>0?'入库':'出库'} ${formatQuantity(Math.abs(Number(row.deltaQty)))}`} {row.unit}</p><Typography.Text type="secondary">{row.direction==='MOVE'?`${row.sourcePath} → ${row.targetPath}`:<LocationName location={row}/>} · {row.documentNo}</Typography.Text></div>}))}/>{!activity.length&&<Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无库存动态"/>}</Card></>}</main></div>
+    {operation==='count'
+      ? <StockCheckOperationModal context={selected} detail={detail} seed={seed} onClose={()=>setOperation(undefined)} onDone={()=>{setOperation(undefined);void load();window.dispatchEvent(new Event('inventory:refresh'));}} />
+      : operation==='inbound'&&detail?.warehouseType==='FG'
+        ? <FinishedInboundOperationModal context={selected} detail={detail} seed={seed} onClose={()=>setOperation(undefined)} onDone={()=>{setOperation(undefined);void load();window.dispatchEvent(new Event('inventory:refresh'));}} />
+        : <OperationModal open={operation} context={selected} detail={detail} seed={seed} user={user} onClose={()=>setOperation(undefined)} onDone={()=>{setOperation(undefined);void load();window.dispatchEvent(new Event('inventory:refresh'));}} loadWarehouseLocations={loadWarehouseLocations}/>}
     <Modal title={`设置容量 · ${capacity?.itemCode||''}`} open={Boolean(capacity)} onCancel={()=>setCapacity(undefined)} onOk={()=>capacityForm.submit()}><Form form={capacityForm} layout="vertical" onFinish={saveCapacity}><Form.Item name="capacity" label="容量上限" rules={[{required:true}]}><InputNumber min={1} precision={0} style={{width:'100%'}}/></Form.Item><Form.Item name="notes" label="备注"><Input.TextArea/></Form.Item></Form></Modal>
   </PageScaffold>;
 }

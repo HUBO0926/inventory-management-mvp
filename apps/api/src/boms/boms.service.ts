@@ -55,7 +55,7 @@ export class BomsService {
     if (!bom) throw new BusinessException('NOT_FOUND', 'BOM 不存在');
     bom.lines = await this.db.query(
       `SELECT bi.material_id "materialId",i.item_code "itemCode",i.name,i.item_type "itemType",
-        i.unit,bi.qty_per "qtyPer"
+        i.unit,bi.qty_per "qtyPer",bi.remark
        FROM bom_items bi JOIN items i ON i.id=bi.material_id
        WHERE bi.bom_id=$1 ORDER BY i.item_code`,
       [id],
@@ -151,8 +151,8 @@ export class BomsService {
       }
       for (const line of dto.lines) {
         await qr.query(
-          `INSERT INTO bom_items(id,bom_id,material_id,qty_per) VALUES($1,$2,$3,$4)`,
-          [randomUUID(), bomId, line.materialId, new Decimal(line.qtyPer).toFixed(0)],
+          `INSERT INTO bom_items(id,bom_id,material_id,qty_per,remark) VALUES($1,$2,$3,$4,$5)`,
+          [randomUUID(), bomId, line.materialId, new Decimal(line.qtyPer).toFixed(0), line.remark?.trim() || null],
         );
       }
       await this.audit.log(userId, id ? 'UPDATE_BOM' : 'CREATE_BOM', 'boms', bomId!, dto, qr.manager);
@@ -163,7 +163,7 @@ export class BomsService {
       if (error.code === '23505') {
         throw new BusinessException(
           'DUPLICATE_CODE',
-          '同一产出成品已有相同版本，或已有其他启用 BOM',
+          '同一产出成品已有相同型号，或已有其他启用 BOM',
           HttpStatus.CONFLICT,
         );
       }
@@ -180,7 +180,7 @@ export class BomsService {
       version: dto.version,
       status: dto.status || 'INACTIVE',
       notes: source.notes,
-      lines: source.lines.map((line: any) => ({ materialId: line.materialId, qtyPer: line.qtyPer })),
+      lines: source.lines.map((line: any) => ({ materialId: line.materialId, qtyPer: line.qtyPer, remark: line.remark })),
     }, userId);
   }
 
@@ -191,7 +191,7 @@ export class BomsService {
       version: source.version,
       status,
       notes: source.notes,
-      lines: source.lines.map((line: any) => ({ materialId: line.materialId, qtyPer: line.qtyPer })),
+      lines: source.lines.map((line: any) => ({ materialId: line.materialId, qtyPer: line.qtyPer, remark: line.remark })),
     }, userId);
   }
 

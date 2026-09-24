@@ -31,7 +31,7 @@ export class InventoryService {
     const items = await this.db.query(
       `SELECT sb.id,w.id "warehouseId",w.warehouse_code "warehouseCode",w.name "warehouseName",
         z.id "zoneId",z.code "zoneCode",z.name "zoneName",
-        loc.id "locationId",loc.code "locationCode",loc.name "locationName",
+        loc.id "locationId",loc.code "locationCode",loc.code "locationDisplayName",loc.name "locationName",NULLIF(z.actual_location,'未填写') "actualPosition",
         i.id "itemId",i.item_code "itemCode",i.name "itemName",i.item_type "itemType",i.unit,
         batch.id "batchId",batch.batch_no "batchNo",
         sb.on_hand_qty "onHandQty",
@@ -65,7 +65,8 @@ export class InventoryService {
       params.push(value);
       where.push(expression.replace('?', `$${params.length}`));
     };
-    add(q.transactionNo, 't.id::text=?');
+    add(q.transactionId, 't.id::text=?');
+    if (q.flowNo) add(`%${q.flowNo}%`, 't.flow_no ILIKE ?');
     if (q.documentNo) add(`%${q.documentNo}%`, 'd.document_no ILIKE ?');
     add(q.itemId, 't.item_id=?');
     add(q.warehouseId, 't.warehouse_id=?');
@@ -89,21 +90,22 @@ export class InventoryService {
     add(q.dateTo, `t.created_at < (?::date + interval '1 day')`);
     if (q.keyword) {
       params.push(`%${q.keyword}%`);
-      where.push(`(i.item_code ILIKE $${params.length} OR i.name ILIKE $${params.length} OR d.document_no ILIKE $${params.length})`);
+      where.push(`(t.flow_no ILIKE $${params.length} OR i.item_code ILIKE $${params.length} OR i.name ILIKE $${params.length} OR d.document_no ILIKE $${params.length} OR w.warehouse_code ILIKE $${params.length} OR w.name ILIKE $${params.length})`);
     }
     await this.appendWarehouseScope(where, params, 't', user);
     const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
     const [{ count }] = await this.db.query(
       `SELECT count(*)::int count FROM stock_transactions t
        JOIN items i ON i.id=t.item_id JOIN stock_documents d ON d.id=t.source_document_id
+       JOIN warehouses w ON w.id=t.warehouse_id
        JOIN warehouse_locations loc ON loc.id=t.location_id
        LEFT JOIN inventory_batches batch ON batch.id=t.batch_id LEFT JOIN users u ON u.id=t.created_by ${clause}`,
       params,
     );
     params.push(pageSize, offset);
     const items = await this.db.query(
-      `SELECT t.id,t.id "transactionNo",t.created_at "createdAt",w.id "warehouseId",w.warehouse_code "warehouseCode",
-        z.code "zoneCode",loc.id "locationId",loc.code "locationCode",
+      `SELECT t.id,t.flow_no "flowNo",(t.flow_no IS NULL) "isHistoricalFlow",t.created_at "createdAt",w.id "warehouseId",w.warehouse_code "warehouseCode",
+        z.code "zoneCode",loc.id "locationId",loc.code "locationCode",loc.code "locationDisplayName",NULLIF(z.actual_location,'未填写') "actualPosition",
         i.id "itemId",i.item_code "itemCode",i.name "itemName",i.model,i.spec,
         COALESCE(parameters.value,'—') parameters,i.unit,
         batch.id "batchId",batch.batch_no "batchNo",
@@ -130,7 +132,7 @@ export class InventoryService {
   }
 
   async transaction(id: string, user?: AuthUser) {
-    const result = await this.transactions({ transactionNo:id, page:1, pageSize:1 }, user);
+    const result = await this.transactions({ transactionId:id, page:1, pageSize:1 }, user);
     if (!result.items.length) throw new BusinessException('NOT_FOUND', '库存流水不存在', HttpStatus.NOT_FOUND);
     return result.items[0];
   }

@@ -25,6 +25,9 @@ import { CapacityReservationsAndNotes1920000000000 } from './migrations/19200000
 import { WarehouseWorkspacePermissions1930000000000 } from './migrations/1930000000000-WarehouseWorkspacePermissions';
 import { WarehouseManagementWorkbench1940000000000 } from './migrations/1940000000000-WarehouseManagementWorkbench';
 import { FunctionalWarehouseTestRuns1950000000000 } from './migrations/1950000000000-FunctionalWarehouseTestRuns';
+import { FinishedInboundLocationSelectionIndexes1960000000000 } from './migrations/1960000000000-FinishedInboundLocationSelectionIndexes';
+import { FinishedInboundPerformanceIndexes1970000000000 } from './migrations/1970000000000-FinishedInboundPerformanceIndexes';
+import { StockTransactionFlowNumbers1980000000000 } from './migrations/1980000000000-StockTransactionFlowNumbers';
 
 export const createDataSource = () => {
   const connection = process.env.DATABASE_URL
@@ -66,6 +69,9 @@ export const createDataSource = () => {
       WarehouseWorkspacePermissions1930000000000,
     WarehouseManagementWorkbench1940000000000,
     FunctionalWarehouseTestRuns1950000000000,
+    FinishedInboundLocationSelectionIndexes1960000000000,
+    FinishedInboundPerformanceIndexes1970000000000,
+    StockTransactionFlowNumbers1980000000000,
     ],
     extra: { options: '-c timezone=Asia/Shanghai' },
     logging: process.env.DB_LOGGING === 'true',

@@ -7,7 +7,7 @@ import { AuthUser, EntityStatus } from '../common/constants';
 import { IsQuantity } from '../common/validation';
 import { BomsService } from './boms.service';
 
-class BomLineDto { @IsString() materialId: string; @IsQuantity() qtyPer: string; }
+class BomLineDto { @IsString() materialId: string; @IsQuantity() qtyPer: string; @IsOptional() @IsString() @MaxLength(200) remark?: string; }
 class BomDto {
   @IsString() finishedGoodId: string;
   @IsString() @MaxLength(30) version: string;

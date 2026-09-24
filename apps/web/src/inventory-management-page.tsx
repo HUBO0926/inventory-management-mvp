@@ -11,6 +11,7 @@ import { API_BASE, api, idempotencyKey, token } from './api';
 import { formatBeijingTime, formatQuantity, statusText } from './domain';
 import { selectDefaultInventoryWarehouse } from './inventory-report-model';
 import { ResponsiveTable, useIsMobile } from './responsive';
+import { LocationName } from './location-name';
 
 type UserLike = { role: string; permissions?: string[] };
 type TabKey = 'documents' | 'flows' | 'reports';
@@ -75,7 +76,7 @@ function Filters({ values, warehouses, onChange, onReset, flow = false }: any) {
   </>;
   return <div className="inventory-filter-bar">
     {advancedFilters}
-    <Input allowClear value={values.keyword || ''} placeholder={flow ? '流水号 / 单号 / 物料' : '单号 / 生产任务 / 备注'} onChange={event => onChange({ keyword: event.target.value, page: 1 })} />
+    <Input allowClear value={values.keyword || ''} placeholder={flow ? '流水号 / 单号 / 物料 / 仓库' : '单号 / 生产任务 / 备注'} onChange={event => onChange({ keyword: event.target.value, page: 1 })} />
     {!flow && <Select allowClear value={values.documentType} placeholder="业务类型" options={[...typeOptions, { value: 'DEFECTIVE_INBOUND', label: '不良品入库' }]} onChange={value => onChange({ documentType: value, page: 1 })} />}
     {!flow && <Select allowClear value={values.status} placeholder="单据状态" options={statusOptions} onChange={value => onChange({ status: value, page: 1 })} />}
     {flow && <Select allowClear value={values.documentType} placeholder="业务类型" options={typeOptions} onChange={value => onChange({ documentType: value, page: 1 })} />}
@@ -132,17 +133,17 @@ function DocumentDetail({ detail, open, mobile, onClose, onAction, onEdit, user 
       <Table size="small" rowKey="id" pagination={false} scroll={{ x: 900 }} dataSource={detail.lines || []} columns={[
         { title: '物料', render: (_: any, row: any) => `${safe(row.itemCode, '未编码')} ${safe(row.itemName, '未命名物料')}` },
         { title: '型号/规格', render: (_: any, row: any) => `${safe(row.model)} / ${safe(row.spec)}` },
-        { title: '来源位置', render: (_: any, row: any) => `${safe(row.sourceWarehouseCode, detail.warehouseCode)} / ${safe(row.sourceZoneCode)} / ${safe(row.locationCode)}` },
+        { title: '来源库位', render: (_: any, row: any) => <LocationName location={row} /> },
         { title: '目标位置', render: (_: any, row: any) => row.targetWarehouseCode ? `${row.targetWarehouseCode} / ${safe(row.targetZoneCode)} / ${safe(row.targetLocationCode)}` : '—' },
         { title: '批次', dataIndex: 'batchNo', render: safe },
         { title: '数量', align: 'right' as const, render: (_: any, row: any) => `${formatQuantity(row.quantity)} ${safe(row.unit, '')}` },
       ]} />
       {detail.documentType==='STOCK_CHECK'&&<Card size="small" title="盘点明细"><Table size="small" rowKey="id" pagination={false} dataSource={detail.stockCheckLines||[]} columns={[
-        {title:'物料',render:(_:any,row:any)=>`${safe(row.itemCode)} ${safe(row.itemName)}`},{title:'库位',render:(_:any,row:any)=>`${safe(row.zoneCode)} / ${safe(row.locationCode)}`},{title:'批次',dataIndex:'batchNo',render:safe},{title:'账面数',dataIndex:'systemQtySnapshot',render:(v:any)=>v===null?'提交时生成':formatQuantity(v)},{title:'实盘数',dataIndex:'countedQty',render:formatQuantity},{title:'差异',dataIndex:'differenceQty',render:(v:any)=>v===null?'—':formatQuantity(v)},{title:'单位',dataIndex:'unit'}
+        {title:'物料',render:(_:any,row:any)=>`${safe(row.itemCode)} ${safe(row.itemName)}`},{title:'库位',render:(_:any,row:any)=><LocationName location={row} />},{title:'批次',dataIndex:'batchNo',render:safe},{title:'账面数',dataIndex:'systemQtySnapshot',render:(v:any)=>v===null?'提交时生成':formatQuantity(v)},{title:'实盘数',dataIndex:'countedQty',render:formatQuantity},{title:'差异',dataIndex:'differenceQty',render:(v:any)=>v===null?'—':formatQuantity(v)},{title:'单位',dataIndex:'unit'}
       ]}/></Card>}
       {detail.receiptAllocations?.length>0&&<Card size="small" title="审核入库分配"><Table size="small" rowKey={(row:any)=>`${row.documentLineId}-${row.disposition}-${row.locationId}`} pagination={false} dataSource={detail.receiptAllocations} columns={[
         {title:'类别',dataIndex:'disposition',render:(value:string)=>value==='NORMAL'?'正常品':'不良品'},
-        {title:'仓库 / 库位',render:(_:any,row:any)=>`${safe(row.warehouseCode)} / ${safe(row.locationCode)}`},
+        {title:'库位',render:(_:any,row:any)=><LocationName location={row} />},
         {title:'数量',dataIndex:'quantity',render:formatQuantity},{title:'不良原因',dataIndex:'defectReason',render:safe},
       ]}/></Card>}
       <Card size="small" title="操作记录">
@@ -157,7 +158,7 @@ function DocumentDetail({ detail, open, mobile, onClose, onAction, onEdit, user 
         <Table size="small" rowKey="id" pagination={false} dataSource={detail.transactions || []} columns={[
           { title: '时间', dataIndex: 'createdAt', render: dateTime },
           { title: '物料', render: (_: any, row: any) => `${safe(row.itemCode)} ${safe(row.itemName)}` },
-          { title: '仓库/库位', render: (_: any, row: any) => `${safe(row.warehouseCode)} / ${safe(row.locationCode)}` },
+          { title: '库位', render: (_: any, row: any) => <LocationName location={row} /> },
           { title: '变动', dataIndex: 'deltaQty', align: 'right' as const, render: (value: any) => <span className={Number(value) >= 0 ? 'qty-in' : 'qty-out'}>{Number(value) >= 0 ? '+' : ''}{formatQuantity(value)}</span> },
         ]} />
       </Card>
@@ -273,24 +274,24 @@ function FlowsTab({ params, updateParams, warehouses }: any) {
       operator: undefined, model: undefined, parameter: undefined, dateFrom: undefined, dateTo: undefined, page: 1,
     })} />
     <Table rowKey="id" loading={loading} dataSource={data.items || []} scroll={{ x: 1250 }} columns={[
-      { title: '流水号', dataIndex: 'transactionNo', render: (value: any, row: any) => <Button type="link" onClick={() => updateParams({ flowId: row.id })}>{safe(value)}</Button> },
+      { title: '流水号', dataIndex: 'flowNo', render: (value: any, row: any) => <Button type="link" onClick={() => updateParams({ flowId: row.id })}>{row.isHistoricalFlow ? '历史流水（无业务号）' : safe(value, '历史流水（无业务号）')}</Button> },
       { title: '时间', dataIndex: 'createdAt', render: dateTime },
       { title: '单据', render: (_: any, row: any) => <Button type="link" onClick={() => updateParams({ tab: 'documents', documentId: row.documentId, flowId: undefined })}>{safe(row.documentNo)}</Button> },
       { title: '业务类型', dataIndex: 'documentType', render: (value: any) => statusText[value] || safe(value) },
-      { title: '仓库/库位', render: (_: any, row: any) => `${safe(row.warehouseCode)} / ${safe(row.zoneCode)} / ${safe(row.locationCode)}` },
+      { title: '库位', render: (_: any, row: any) => <LocationName location={row} /> },
       { title: '物料', render: (_: any, row: any) => `${safe(row.itemCode)} ${safe(row.itemName)}` },
       { title: '批次', dataIndex: 'batchNo', render: safe },
       { title: '变动量', dataIndex: 'deltaQty', align: 'right', render: (value: any, row: any) => <span className={Number(value) >= 0 ? 'qty-in' : 'qty-out'}>{Number(value) >= 0 ? '+' : ''}{formatQuantity(value)} {safe(row.unit, '')}</span> },
       { title: '结余', dataIndex: 'balanceAfter', align: 'right', render: formatQuantity },
       { title: '操作人', dataIndex: 'operator', render: (value: any) => safe(value, '未知人员') },
     ]} pagination={{ current: Number(values.page || 1), pageSize: 20, total: data.total || 0, showTotal: total => `共 ${total} 条`, onChange: page => updateParams({ page }) }} />
-    <Drawer title={`库存流水详情 · ${safe(detail?.transactionNo)}`} width={mobile ? '100%' : 680} open={Boolean(flowId)} onClose={() => updateParams({ flowId: undefined })}>
+    <Drawer title={`库存流水详情 · ${detail?.isHistoricalFlow ? '历史流水（无业务号）' : safe(detail?.flowNo, '历史流水（无业务号）')}`} width={mobile ? '100%' : 680} open={Boolean(flowId)} onClose={() => updateParams({ flowId: undefined })}>
       {detail && <Descriptions bordered size="small" column={mobile ? 1 : 2}>
         <Descriptions.Item label="发生时间">{dateTime(detail.createdAt)}</Descriptions.Item>
         <Descriptions.Item label="操作人">{safe(detail.operator, '未知人员')}</Descriptions.Item>
         <Descriptions.Item label="来源单据"><Button type="link" onClick={() => updateParams({ tab: 'documents', documentId: detail.documentId, flowId: undefined })}>{safe(detail.documentNo)}</Button></Descriptions.Item>
         <Descriptions.Item label="业务类型">{statusText[detail.documentType] || safe(detail.documentType)}</Descriptions.Item>
-        <Descriptions.Item label="仓库/库位" span={2}>{safe(detail.warehouseCode)} / {safe(detail.zoneCode)} / {safe(detail.locationCode)}</Descriptions.Item>
+        <Descriptions.Item label="库位" span={2}><LocationName location={detail} /></Descriptions.Item>
         <Descriptions.Item label="物料" span={2}>{safe(detail.itemCode)} {safe(detail.itemName)} · {safe(detail.model)} / {safe(detail.spec)}</Descriptions.Item>
         <Descriptions.Item label="批次">{safe(detail.batchNo)}</Descriptions.Item>
         <Descriptions.Item label="变动数量">{formatQuantity(detail.deltaQty)} {safe(detail.unit, '')}</Descriptions.Item>
@@ -351,7 +352,7 @@ function CurrentInventoryDetail({ itemId, warehouseId, open, mobile, onClose, on
 
   const distributionColumns = [
     { title: '库区', render: (_: any, row: any) => `${safe(row.zoneCode, '未命名库区')} ${safe(row.zoneName, '')}` },
-    { title: '库位', render: (_: any, row: any) => `${safe(row.locationCode, '未命名库位')} ${safe(row.locationName, '')}` },
+    { title: '库位', render: (_: any, row: any) => <LocationName location={row} /> },
     { title: '批次', dataIndex: 'batchNo', render: safe },
     { title: '当前库存', dataIndex: 'onHandQty', align: 'right' as const, render: formatQuantity },
     { title: '可用库存', dataIndex: 'availableQty', align: 'right' as const, render: formatQuantity },
@@ -360,10 +361,11 @@ function CurrentInventoryDetail({ itemId, warehouseId, open, mobile, onClose, on
     { title: '更新时间', dataIndex: 'updatedAt', render: dateTime },
   ];
   const ledgerColumns = [
+    { title: '流水号', dataIndex: 'flowNo', render: (value: any, row: any) => row.isHistoricalFlow ? '历史流水（无业务号）' : safe(value, '历史流水（无业务号）') },
     { title: '发生时间', dataIndex: 'createdAt', render: dateTime },
     { title: '来源单据', render: (_: any, row: any) => <Button type="link" onClick={() => onDocument(row.documentId)}>{safe(row.documentNo, '未生成单号')}</Button> },
     { title: '业务类型', dataIndex: 'documentType', render: (value: any) => statusText[value] || safe(value) },
-    { title: '库区/库位', render: (_: any, row: any) => `${safe(row.zoneCode, '未命名库区')} / ${safe(row.locationCode, '未命名库位')}` },
+    { title: '库位', render: (_: any, row: any) => <LocationName location={row} /> },
     { title: '批次', dataIndex: 'batchNo', render: safe },
     { title: '变动数量', dataIndex: 'deltaQty', align: 'right' as const, render: (value: any, row: any) => <span className={Number(value) >= 0 ? 'qty-in' : 'qty-out'}>{Number(value) >= 0 ? '+' : ''}{formatQuantity(value)} {safe(row.unit, '')}</span> },
     { title: '变动后结余', dataIndex: 'balanceAfter', align: 'right' as const, render: formatQuantity },
@@ -371,7 +373,7 @@ function CurrentInventoryDetail({ itemId, warehouseId, open, mobile, onClose, on
   ];
   const ledgerView = <Space direction="vertical" size={12} style={{ width: '100%' }}>
     <div className="inventory-detail-filters">
-      <Input allowClear value={ledgerFilters.keyword || ''} placeholder="单号或物料关键字" onChange={event => { setLedgerPage(1); setLedgerFilters((value: any) => ({ ...value, keyword: event.target.value })); }} />
+      <Input allowClear value={ledgerFilters.keyword || ''} placeholder="流水号、单据号、物料或仓库" onChange={event => { setLedgerPage(1); setLedgerFilters((value: any) => ({ ...value, keyword: event.target.value })); }} />
       <Select allowClear value={ledgerFilters.documentType} placeholder="业务类型" options={typeOptions} onChange={value => { setLedgerPage(1); setLedgerFilters((current: any) => ({ ...current, documentType: value })); }} />
       <DatePicker.RangePicker
         value={ledgerFilters.dateFrom && ledgerFilters.dateTo ? [dayjs(ledgerFilters.dateFrom), dayjs(ledgerFilters.dateTo)] : null}

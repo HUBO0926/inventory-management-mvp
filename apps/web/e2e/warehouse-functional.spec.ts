@@ -77,6 +77,26 @@ test('仓库管理与虚拟仓可双向定位', async ({ page }, testInfo) => {
   await expect(page.getByText('库位物料库存')).toBeVisible();
 });
 
+test('虚拟仓库以紧凑地图展示并继承库位作业上下文', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop-chromium');
+  await login(page, 'warehouse');
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await page.goto('/virtual-warehouse?warehouse=TEST-FUNC-RAW-A&zone=TEST-FUNC-RAW-A-A&location=TEST-FUNC-RAW-A-A-01');
+  await expect(page.getByRole('heading', { name: '虚拟仓库' })).toBeVisible();
+  await expect(page.locator('.virtual-metrics-compact .virtual-metric')).toHaveCount(4);
+  await expect(page.locator('.virtual-konva-wrap').first()).toHaveCSS('height', /^(2|3|4|5)\d{2}px$/);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+
+  await page.getByRole('button', { name: '展开地图' }).click();
+  await expect(page.getByRole('dialog', { name: /二维仓储地图/ })).toBeVisible();
+  await page.keyboard.press('Escape');
+
+  await page.getByText('库位视图').click();
+  await page.locator('.virtual-actions-panel').getByRole('button', { name: '入库' }).click();
+  await expect(page).toHaveURL(/inventory\/warehouse-management.*operation=inbound/);
+  await expect(page.getByRole('dialog', { name: /入库/ })).toBeVisible();
+});
+
 test('仓管可从库位弹窗提交入库，审批过账后页面刷新库存动态', async ({ page, request }, testInfo) => {
   test.skip(testInfo.project.name !== 'desktop-chromium');
   await login(page, 'warehouse');

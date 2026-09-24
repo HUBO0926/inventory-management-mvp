@@ -40,7 +40,7 @@ export class LocationItemCapacitiesController {
     return this.db.query(`
       SELECT c.location_id "locationId",c.item_id "itemId",c.capacity::text capacity,c.notes,
         w.id "warehouseId",w.warehouse_code "warehouseCode",z.id "zoneId",z.code "zoneCode",
-        l.code "locationCode",l.name "locationName",i.item_code "itemCode",i.name "itemName",i.unit
+        l.code "locationCode",l.code "locationDisplayName",l.name "locationName",NULLIF(z.actual_location,'未填写') "actualPosition",i.item_code "itemCode",i.name "itemName",i.unit
       FROM location_item_capacities c
       JOIN warehouse_locations l ON l.id=c.location_id
       JOIN warehouse_zones z ON z.id=l.zone_id

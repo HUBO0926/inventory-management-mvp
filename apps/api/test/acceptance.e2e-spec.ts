@@ -302,7 +302,7 @@ describe('库存管理固定验收场景',()=>{
 
   it('V1.1.0 主数据、动态角色、审批状态和库存调整可完整运行',async()=>{
     const version=await request(app.getHttpServer()).get('/api/system/version').expect(200);
-    expect(version.body.data.version).toBe('1.7.0');
+    expect(version.body.data.version).toBe('1.8.0');
 
     const [adminRole]=await db.query(`SELECT id FROM roles WHERE code='ADMIN'`);
     const legacyUser=await request(app.getHttpServer()).post('/api/users').set(auth(admin)).send({

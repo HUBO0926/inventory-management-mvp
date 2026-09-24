@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { QueryRunner } from 'typeorm';
+import { BusinessException } from './business.exception';
 import { DocumentType } from './constants';
 
 export const DOCUMENT_NUMBER_PREFIX: Record<DocumentType, string> = {
@@ -18,6 +19,23 @@ export const DOCUMENT_NUMBER_PREFIX: Record<DocumentType, string> = {
   [DocumentType.REVERSAL]: 'CX',
 };
 
+/** Inventory ledger numbers are independent from document numbers. */
+export const STOCK_FLOW_NUMBER_PREFIX: Record<DocumentType, string> = {
+  [DocumentType.FINISHED_INBOUND]: 'CPRK',
+  [DocumentType.PRODUCTION_COMPLETION]: 'CPRK',
+  [DocumentType.MATERIAL_INBOUND]: 'YLRK',
+  [DocumentType.PRODUCTION_RETURN]: 'YLRK',
+  [DocumentType.FINISHED_OUTBOUND]: 'CPCK',
+  [DocumentType.PRODUCTION_ISSUE]: 'YLCK',
+  [DocumentType.STOCK_MOVE]: 'YK',
+  [DocumentType.STOCK_CHECK]: 'PD',
+  [DocumentType.INVENTORY_ADJUSTMENT]: 'TZ',
+  [DocumentType.DEFECTIVE_RETURN]: 'TZ',
+  [DocumentType.DEFECTIVE_REPAIR_RESTOCK]: 'TZ',
+  [DocumentType.DEFECTIVE_PRODUCTION_RETURN]: 'TZ',
+  [DocumentType.REVERSAL]: 'TZ',
+};
+
 type NumberSource = 'stock_documents' | 'production_orders';
 
 @Injectable()
@@ -28,6 +46,27 @@ export class BusinessNumberService {
 
   productionOrder(qr: QueryRunner) {
     return this.next(qr, 'SCRW', 'production_orders');
+  }
+
+  async stockFlow(qr: QueryRunner, type: DocumentType) {
+    const prefix = STOCK_FLOW_NUMBER_PREFIX[type];
+    if (!prefix) throw new BusinessException('VALIDATION_ERROR', '未配置库存流水业务类型');
+    const [clock] = await qr.query(`
+      SELECT value::date "flowDate",to_char(value,'YYYYMMDD') "dateStamp"
+      FROM (SELECT clock_timestamp() AT TIME ZONE 'Asia/Shanghai' value) clock
+    `);
+    const [counter] = await qr.query(`
+      INSERT INTO stock_transaction_flow_sequences(flow_date,last_sequence)
+      VALUES($1,1)
+      ON CONFLICT(flow_date) DO UPDATE
+        SET last_sequence=stock_transaction_flow_sequences.last_sequence+1,updated_at=now()
+      RETURNING last_sequence "sequence"
+    `, [clock.flowDate]);
+    const sequence = Number(counter?.sequence);
+    if (!Number.isInteger(sequence) || sequence < 1 || sequence > 999999) {
+      throw new BusinessException('FLOW_SEQUENCE_EXHAUSTED', '当日库存流水号已达到上限，请联系系统管理员');
+    }
+    return `LS-${prefix}-${clock.dateStamp}-${String(sequence).padStart(6, '0')}`;
   }
 
   private async next(qr: QueryRunner, prefix: string | undefined, source: NumberSource) {

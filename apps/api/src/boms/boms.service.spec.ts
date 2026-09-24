@@ -35,4 +35,26 @@ describe('BomsService itemOptions', () => {
     const service = new BomsService({ query: jest.fn() } as any, {} as any);
     await expect(service.itemOptions({ role: 'unknown' as any })).rejects.toThrow('BOM 候选物料类型无效');
   });
+
+  it('查询 BOM 明细时返回单件用料备注', async () => {
+    const query = jest.fn()
+      .mockResolvedValueOnce([{ id: 'bom-1', version: 'M-01', status: 'ACTIVE', finishedGoodId: 'fg-1' }])
+      .mockResolvedValueOnce([{ materialId: 'material-1', itemCode: 'M-001', qtyPer: '2', remark: '装配前检验' }]);
+    const service = new BomsService({ query } as any, {} as any);
+
+    const result = await service.get('bom-1');
+    expect(result.lines[0].remark).toBe('装配前检验');
+    expect(query.mock.calls[1][0]).toContain('bi.remark');
+  });
+
+  it('复制 BOM 时保留每条组成物料备注', async () => {
+    const service = new BomsService({ query: jest.fn() } as any, {} as any);
+    jest.spyOn(service, 'get').mockResolvedValue({ finishedGoodId: 'fg-1', version: 'M-01', notes: '主备注', lines: [{ materialId: 'material-1', qtyPer: '2', remark: '装配前检验' }] });
+    const save = jest.spyOn(service, 'save').mockResolvedValue({ id: 'bom-copy' });
+
+    await service.copy('bom-1', { version: 'M-02', status: 'INACTIVE' }, 'user-1');
+    expect(save).toHaveBeenCalledWith(null, expect.objectContaining({
+      lines: [{ materialId: 'material-1', qtyPer: '2', remark: '装配前检验' }],
+    }), 'user-1');
+  });
 });

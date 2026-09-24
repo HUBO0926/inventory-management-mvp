@@ -93,11 +93,11 @@ export class InventoryPostingService {
         if (line.location_warehouse_id !== doc.warehouse_id || !line.target_warehouse_id || !line.target_location_id) throw new BusinessException('VALIDATION_ERROR', '移库来源或目标不完整');
         const [target] = await qr.query(`SELECT l.warehouse_id,b.item_id batch_item_id FROM warehouse_locations l LEFT JOIN inventory_batches b ON b.id=$2 WHERE l.id=$1 AND l.status='ACTIVE'`, [line.target_location_id, line.target_batch_id || line.batch_id]);
         if (!target || target.warehouse_id !== line.target_warehouse_id || (target.batch_item_id && target.batch_item_id !== line.item_id)) throw new BusinessException('VALIDATION_ERROR', '移库目标仓库、库位或批次无效');
-        postedLines.push(await this.postLine(qr, documentId, userId, line, doc.warehouse_id, line.location_id, line.batch_id, Direction.OUT));
-        postedLines.push(await this.postLine(qr, documentId, userId, line, line.target_warehouse_id, line.target_location_id, line.target_batch_id || line.batch_id, Direction.IN));
+        postedLines.push(await this.postLine(qr, documentId, userId, line, doc.warehouse_id, line.location_id, line.batch_id, Direction.OUT, doc.document_type));
+        postedLines.push(await this.postLine(qr, documentId, userId, line, line.target_warehouse_id, line.target_location_id, line.target_batch_id || line.batch_id, Direction.IN, doc.document_type));
       }
     } else if (doc.document_type === DocumentType.REVERSAL) {
-      for (const line of lines) postedLines.push(await this.postLine(qr, documentId, userId, line, line.target_warehouse_id || doc.warehouse_id, line.location_id, line.batch_id, line.direction));
+      for (const line of lines) postedLines.push(await this.postLine(qr, documentId, userId, line, line.target_warehouse_id || doc.warehouse_id, line.location_id, line.batch_id, line.direction, doc.document_type));
     } else {
       const allocations = [DocumentType.MATERIAL_INBOUND, DocumentType.FINISHED_INBOUND, DocumentType.PRODUCTION_RETURN, DocumentType.PRODUCTION_COMPLETION].includes(doc.document_type) ? await qr.query(`SELECT a.*,l.item_id FROM stock_document_receipt_allocations a JOIN stock_document_lines l ON l.id=a.document_line_id WHERE l.document_id=$1 ORDER BY a.warehouse_id,a.location_id,a.id`, [documentId]) : [];
       if (allocations.length) {
@@ -108,12 +108,12 @@ export class InventoryPostingService {
             const [target] = await qr.query(`SELECT w.warehouse_type FROM warehouse_locations l JOIN warehouses w ON w.id=l.warehouse_id WHERE l.id=$1 AND l.warehouse_id=$2 AND l.status='ACTIVE' AND l.is_archived=false AND w.status='ACTIVE' AND w.deleted_at IS NULL`, [row.location_id, row.warehouse_id]);
             const normalType = line.item_type === 'MATERIAL' ? 'RAW' : 'FG';
             if (!target || (row.disposition === 'NORMAL' && target.warehouse_type !== normalType) || (row.disposition === 'DEFECTIVE' && target.warehouse_type !== 'DEFECTIVE')) throw new BusinessException('VALIDATION_ERROR', '审核分配的仓库或库位不符合入库规则');
-            postedLines.push(await this.postLine(qr, documentId, userId, { ...line, quantity: row.quantity }, row.warehouse_id, row.location_id, row.batch_id || line.batch_id, Direction.IN));
+            postedLines.push(await this.postLine(qr, documentId, userId, { ...line, quantity: row.quantity }, row.warehouse_id, row.location_id, row.batch_id || line.batch_id, Direction.IN, doc.document_type));
             if (row.disposition === 'DEFECTIVE') await qr.query(`INSERT INTO defective_inventory_lots(source_allocation_id,source_document_id,source_document_line_id,item_id,warehouse_id,location_id,batch_id,production_order_id,defect_reason,received_qty,remaining_qty)
               VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10)`, [row.id,documentId,line.id,line.item_id,row.warehouse_id,row.location_id,row.batch_id||line.batch_id,doc.production_order_id,row.defect_reason,row.quantity]);
           }
         }
-      } else for (const line of lines) { const sourceWarehouseId = line.source_warehouse_id || doc.warehouse_id; if (line.location_warehouse_id !== sourceWarehouseId || (line.batch_id && line.batch_item_id !== line.item_id)) throw new BusinessException('VALIDATION_ERROR', '库位、仓库或批次不属于单据明细'); postedLines.push(await this.postLine(qr, documentId, userId, line, sourceWarehouseId, line.location_id, line.batch_id, line.direction)); }
+      } else for (const line of lines) { const sourceWarehouseId = line.source_warehouse_id || doc.warehouse_id; if (line.location_warehouse_id !== sourceWarehouseId || (line.batch_id && line.batch_item_id !== line.item_id)) throw new BusinessException('VALIDATION_ERROR', '库位、仓库或批次不属于单据明细'); postedLines.push(await this.postLine(qr, documentId, userId, line, sourceWarehouseId, line.location_id, line.batch_id, line.direction, doc.document_type)); }
     }
     await this.reservations.consumeDocument(qr, documentId);
     await this.operations?.refreshInventoryAlerts(qr,[doc.warehouse_id,...lines.map((line:any)=>line.target_warehouse_id).filter(Boolean)]);
@@ -125,7 +125,7 @@ export class InventoryPostingService {
     return { id: documentId, documentNo: doc.document_no, documentType: doc.document_type, status: 'POSTED', lines: postedLines };
   }
 
-  private async postLine(qr: QueryRunner, documentId: string, userId: string, line: any, warehouseId: string, locationId: string, batchId: string | null, direction: Direction) {
+  private async postLine(qr: QueryRunner, documentId: string, userId: string, line: any, warehouseId: string, locationId: string, batchId: string | null, direction: Direction, documentType: DocumentType) {
     await this.operations?.assertOperationAllowed(qr, [locationId], direction===Direction.IN ? [{ locationId, itemId: line.item_id }] : []);
     if (direction === Direction.IN) await this.assertLocationItemCapacity(qr, documentId, locationId, line.item_id, line.quantity);
     await qr.query(`INSERT INTO stock_balances(id,warehouse_id,location_id,item_id,batch_id,on_hand_qty) VALUES($1,$2,$3,$4,$5,0) ON CONFLICT(warehouse_id,location_id,item_id,batch_id) DO NOTHING`, [randomUUID(), warehouseId, locationId, line.item_id, batchId]);
@@ -133,8 +133,9 @@ export class InventoryPostingService {
     const delta = new Decimal(line.quantity).mul(direction === Direction.IN ? 1 : -1), after = new Decimal(balance.on_hand_qty).add(delta); if (after.isNegative()) throw new BusinessException('INSUFFICIENT_STOCK', `${line.item_code} ${line.item_name} 库存不足：可用 ${balance.on_hand_qty}，本次 ${line.quantity}`, HttpStatus.CONFLICT, { itemId: line.item_id, itemCode: line.item_code, availableQty: balance.on_hand_qty, requestQty: line.quantity });
     const value = after.toFixed(0); await qr.query(`UPDATE stock_balances SET on_hand_qty=$1,version=version+1,updated_at=now() WHERE id=$2`, [value, balance.id]);
     const [operator] = await qr.query(`SELECT username,COALESCE(employee_name,name,username) name,department FROM users WHERE id=$1`, [userId]);
-    await qr.query(`INSERT INTO stock_transactions(id,source_document_id,warehouse_id,location_id,item_id,batch_id,balance_before,delta_qty,balance_after,created_by,operator_username,operator_name,operator_department) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`, [randomUUID(), documentId, warehouseId, locationId, line.item_id, batchId, balance.on_hand_qty, delta.toFixed(0), value, userId,operator?.username||null,operator?.name||null,operator?.department||null]);
-    return { itemId: line.item_id, itemCode: line.item_code, locationId, batchId, quantity: new Decimal(line.quantity).toFixed(0), direction, balanceBefore: balance.on_hand_qty, balanceAfter: value };
+    const flowNo = await this.numbers.stockFlow(qr, documentType);
+    await qr.query(`INSERT INTO stock_transactions(id,flow_no,source_document_id,warehouse_id,location_id,item_id,batch_id,balance_before,delta_qty,balance_after,created_by,operator_username,operator_name,operator_department) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`, [randomUUID(), flowNo, documentId, warehouseId, locationId, line.item_id, batchId, balance.on_hand_qty, delta.toFixed(0), value, userId,operator?.username||null,operator?.name||null,operator?.department||null]);
+    return { flowNo, itemId: line.item_id, itemCode: line.item_code, locationId, batchId, quantity: new Decimal(line.quantity).toFixed(0), direction, balanceBefore: balance.on_hand_qty, balanceAfter: value };
   }
 
   private async applyStockCheck(qr: QueryRunner, doc: any, userId: string) {
@@ -147,7 +148,7 @@ export class InventoryPostingService {
       const [balance] = await qr.query(`SELECT on_hand_qty FROM stock_balances WHERE warehouse_id=$1 AND location_id=$2 AND item_id=$3 AND batch_id IS NOT DISTINCT FROM $4 FOR UPDATE`, [line.warehouse_id,line.location_id,line.item_id,line.batch_id]);
       if (line.system_qty_snapshot === null || !new Decimal(balance.on_hand_qty).eq(line.system_qty_snapshot)) throw new BusinessException('STOCK_CHECK_SNAPSHOT_CONFLICT', `${line.item_code} 的账面库存已变化，请重新盘点后提交`, HttpStatus.CONFLICT, { itemId: line.item_id, locationId: line.location_id, snapshotQty: line.system_qty_snapshot, currentQty: balance.on_hand_qty });
       const difference = new Decimal(line.counted_qty).sub(balance.on_hand_qty);
-      if (!difference.isZero()) postedLines.push(await this.postLine(qr, doc.id, userId, { ...line, quantity: difference.abs().toFixed(0) }, line.warehouse_id, line.location_id, line.batch_id, difference.isPositive() ? Direction.IN : Direction.OUT));
+      if (!difference.isZero()) postedLines.push(await this.postLine(qr, doc.id, userId, { ...line, quantity: difference.abs().toFixed(0) }, line.warehouse_id, line.location_id, line.batch_id, difference.isPositive() ? Direction.IN : Direction.OUT, doc.document_type));
     }
     await this.operations?.refreshInventoryAlerts(qr,[doc.warehouse_id]);
     await qr.query(`UPDATE stock_documents SET status='POSTED',posted_by=$1,posted_by_user_id=$1,posted_by_username=(SELECT username FROM users WHERE id=$1),posted_by_name=(SELECT COALESCE(employee_name,name) FROM users WHERE id=$1),posted_at=now(),approved_by=$1,approved_by_user_id=$1,approved_by_username=(SELECT username FROM users WHERE id=$1),approved_by_name=(SELECT COALESCE(employee_name,name) FROM users WHERE id=$1),approved_at=now(),updated_at=now() WHERE id=$2`, [userId,doc.id]);

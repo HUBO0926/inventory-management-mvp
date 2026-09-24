@@ -31,7 +31,7 @@ export class WarehouseStateService {
   async workspace(user: AuthUser, warehouseId: string) {
     const tree = await this.tree(user, warehouseId);
     const [warehouse] = tree.warehouses;
-    const recentTransactions = await this.db.query(`SELECT t.id,t.created_at "createdAt",t.delta_qty "deltaQty",t.balance_after "balanceAfter",i.item_code "itemCode",i.name "itemName",l.code "locationCode",u.username "operator" FROM stock_transactions t JOIN items i ON i.id=t.item_id JOIN warehouse_locations l ON l.id=t.location_id LEFT JOIN users u ON u.id=t.created_by WHERE t.warehouse_id=$1 ORDER BY t.created_at DESC LIMIT 10`, [warehouseId]);
+    const recentTransactions = await this.db.query(`SELECT t.id,t.created_at "createdAt",t.delta_qty "deltaQty",t.balance_after "balanceAfter",d.document_type "documentType",i.item_code "itemCode",i.name "itemName",l.code "locationCode",l.code "locationDisplayName",NULLIF(z.actual_location,'未填写') "actualPosition",COALESCE(t.operator_name,u.employee_name,u.name,u.username,'—') "operator" FROM stock_transactions t JOIN stock_documents d ON d.id=t.source_document_id JOIN items i ON i.id=t.item_id JOIN warehouse_locations l ON l.id=t.location_id JOIN warehouse_zones z ON z.id=l.zone_id LEFT JOIN users u ON u.id=t.created_by WHERE t.warehouse_id=$1 ORDER BY t.created_at DESC LIMIT 10`, [warehouseId]);
     const recentDocuments = await this.db.query(`SELECT id,document_no "documentNo",document_type "documentType",status,created_at "createdAt",posted_at "postedAt" FROM stock_documents WHERE warehouse_id=$1 ORDER BY created_at DESC LIMIT 10`, [warehouseId]);
     return { warehouse, zones: tree.zones, locations: tree.locations, summary: tree.summary, unitStatistics: tree.unitStatistics, recentTransactions, recentDocuments };
   }
@@ -48,7 +48,7 @@ export class WarehouseStateService {
       SELECT warehouse_id,location_id,item_id FROM stock UNION SELECT warehouse_id,location_id,item_id FROM outbound UNION SELECT warehouse_id,location_id,item_id FROM incoming UNION SELECT l.warehouse_id,c.location_id,c.item_id FROM location_item_capacities c JOIN warehouse_locations l ON l.id=c.location_id
     )
     SELECT w.id "warehouseId",w.warehouse_code "warehouseCode",w.display_name "warehouseName",w.name,w.warehouse_type "warehouseType",
-      z.id "zoneId",z.code "zoneCode",z.name "zoneName",z.status "zoneStatus",l.id "locationId",l.code "locationCode",l.name "locationName",l.status "locationStatus",l.is_archived "isArchived",
+      z.id "zoneId",z.code "zoneCode",z.name "zoneName",NULLIF(z.actual_location,'未填写') "actualPosition",z.status "zoneStatus",l.id "locationId",l.code "locationCode",l.code "locationDisplayName",l.name "locationName",l.status "locationStatus",l.is_archived "isArchived",
       i.id "itemId",i.item_code "itemCode",i.name "itemName",i.model,i.unit,i.minimum_stock "minimumStock",i.item_type "itemType",c.capacity::text "capacityQty",c.notes,
       EXISTS(SELECT 1 FROM warehouse_operation_locks ol WHERE ol.status='ACTIVE' AND ol.warehouse_id=l.warehouse_id AND (ol.scope_type='WAREHOUSE' OR ol.zone_id=l.zone_id OR ol.location_id=l.id)) "operationLocked",
       COALESCE(s.on_hand,0)::text "onHandQty",COALESCE(s.frozen,0)::text "frozenQty",COALESCE(o.quantity,0)::text "outboundReservedQty",COALESCE(inc.quantity,0)::text "pendingInboundQty",

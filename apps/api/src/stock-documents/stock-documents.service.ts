@@ -12,12 +12,21 @@ import { ApprovalWorkflowService } from '../approvals/approval-workflow.service'
 import { WarehouseAccessService } from '../warehouses/warehouse-access.service';
 import { WarehouseManagementService } from '../warehouses/warehouse-management.service';
 
+const warehouseTypeForItem = (itemType: ItemType) => {
+  if (itemType === ItemType.MATERIAL) return 'RAW';
+  if (itemType === ItemType.FINISHED_GOOD) return 'FG';
+  throw new BusinessException('VALIDATION_ERROR', '物料类型不支持仓储操作');
+};
+
 @Injectable()
 export class StockDocumentsService {
   constructor(private readonly db: DataSource, private readonly posting: InventoryPostingService, private readonly audit: AuditService, private readonly approvalHistory: ApprovalHistoryService, private readonly reservations: StockReservationService, private readonly workflow: ApprovalWorkflowService, private readonly warehouseAccess: WarehouseAccessService, @Optional() private readonly operations?: WarehouseManagementService) {}
 
   async create(type: DocumentType, dto: any, user: AuthUser) {
     const userId = user.id;
+    if (type === DocumentType.FINISHED_OUTBOUND && !dto.warehouseId) {
+      throw this.lineError(0, 'locationId', 'SOURCE_LOCATION_REQUIRED', '请先选择来源库位');
+    }
     const qr = this.db.createQueryRunner(); await qr.connect(); await qr.startTransaction();
     try {
       const expectedType = type === DocumentType.MATERIAL_INBOUND ? 'RAW' : type === DocumentType.FINISHED_OUTBOUND || type === DocumentType.FINISHED_INBOUND ? 'FG' : undefined;
@@ -26,7 +35,9 @@ export class StockDocumentsService {
         : await qr.query(`SELECT id,warehouse_type FROM warehouses WHERE warehouse_type=$1 AND status='ACTIVE' AND deleted_at IS NULL ORDER BY warehouse_code LIMIT 1`, [expectedType]);
       if (!warehouse || (expectedType && warehouse.warehouse_type !== expectedType)) throw new BusinessException('VALIDATION_ERROR', '仓库不存在、已停用或类型不符合单据要求');
       await this.warehouseAccess.assertWarehouse(user, warehouse.id);
-      const lines = await this.fillDefaultLocations(qr, dto.lines, warehouse.id);
+      if (type === DocumentType.FINISHED_INBOUND && !dto.warehouseId) throw new BusinessException('VALIDATION_ERROR', '请先在任一明细中确认入库库位', undefined, { lineErrors: [{ index: 0, field: 'locationId', code: 'LOCATION_REQUIRED', message: '请选择具体入库库位' }] });
+      const lines = type === DocumentType.FINISHED_INBOUND ? dto.lines : await this.fillDefaultLocations(qr, dto.lines, warehouse.id);
+      if (type === DocumentType.FINISHED_INBOUND) await this.prepareFinishedInboundLines(qr, lines, warehouse.id);
       await this.validateManualLines(qr, type, lines, warehouse.id);
       if (type === DocumentType.INVENTORY_ADJUSTMENT) await this.validateAdjustmentLines(qr, lines, warehouse.id);
       const direction = [DocumentType.MATERIAL_INBOUND, DocumentType.FINISHED_INBOUND].includes(type) ? Direction.IN : Direction.OUT;
@@ -38,6 +49,7 @@ export class StockDocumentsService {
 
   async createMove(dto: any, user: AuthUser) {
     const userId = user.id;
+    if (!dto.warehouseId) throw this.lineError(0, 'locationId', 'SOURCE_LOCATION_REQUIRED', '请先选择移出位置');
     const qr = this.db.createQueryRunner(); await qr.connect(); await qr.startTransaction();
     try {
       const [source] = await qr.query(`SELECT id FROM warehouses WHERE id=$1 AND status='ACTIVE' AND deleted_at IS NULL`, [dto.warehouseId]);
@@ -45,7 +57,7 @@ export class StockDocumentsService {
       if (!Array.isArray(dto.lines) || !dto.lines.length) throw new BusinessException('VALIDATION_ERROR', '移库单至少包含一条明细');
       for (const line of dto.lines) {
         if (!line.targetWarehouseId || !line.targetLocationId) throw new BusinessException('VALIDATION_ERROR', '请完整选择移库目标仓库和库位');
-        if (line.targetWarehouseId === dto.warehouseId && line.targetLocationId === line.locationId) throw new BusinessException('VALIDATION_ERROR', '移库来源和目标不能相同');
+        if (line.targetLocationId === line.locationId) throw new BusinessException('VALIDATION_ERROR', '移库来源和目标不能相同');
       }
       await this.warehouseAccess.assertWarehouses(user, [dto.warehouseId, ...dto.lines.map((line: any) => line.targetWarehouseId)]);
       await this.validateMoveLines(qr, dto.lines, dto.warehouseId);
@@ -69,7 +81,8 @@ export class StockDocumentsService {
       }
       if (![DocumentType.MATERIAL_INBOUND, DocumentType.FINISHED_INBOUND, DocumentType.FINISHED_OUTBOUND, DocumentType.STOCK_MOVE].includes(doc.document_type)) throw new BusinessException('INVALID_STATUS', '该单据不能在此编辑');
       const lines = doc.document_type === DocumentType.STOCK_MOVE
-        ? dto.lines : await this.fillDefaultLocations(qr, dto.lines, doc.warehouse_id);
+        ? dto.lines : doc.document_type === DocumentType.FINISHED_INBOUND ? dto.lines : await this.fillDefaultLocations(qr, dto.lines, doc.warehouse_id);
+      if (doc.document_type === DocumentType.FINISHED_INBOUND) await this.prepareFinishedInboundLines(qr, lines, doc.warehouse_id);
       if (doc.document_type === DocumentType.STOCK_MOVE) await this.validateMoveLines(qr, lines, doc.warehouse_id);
       else await this.validateManualLines(qr, doc.document_type, lines, doc.warehouse_id);
       if (doc.document_type === DocumentType.STOCK_MOVE) await this.warehouseAccess.assertWarehouses(user, [doc.warehouse_id, ...lines.map((line: any) => line.targetWarehouseId)]);
@@ -110,8 +123,17 @@ export class StockDocumentsService {
       if (doc.document_type === DocumentType.STOCK_CHECK) await this.captureStockCheckSnapshot(qr,id);
       else {
         const operationLines = await qr.query(`SELECT location_id "locationId",target_location_id "targetLocationId",item_id "itemId",direction FROM stock_document_lines WHERE document_id=$1`, [id]);
-        await this.operations?.assertOperationAllowed(qr, operationLines.flatMap((line: any) => [line.locationId,line.targetLocationId]), operationLines.flatMap((line: any) => line.targetLocationId?[{locationId:line.targetLocationId,itemId:line.itemId}]:line.direction===Direction.IN?[{locationId:line.locationId,itemId:line.itemId}]:[]));
-        await this.reservations.reserveDocument(qr,id);
+        try {
+          await this.operations?.assertOperationAllowed(qr, operationLines.flatMap((line: any) => [line.locationId,line.targetLocationId]), operationLines.flatMap((line: any) => line.targetLocationId?[{locationId:line.targetLocationId,itemId:line.itemId}]:line.direction===Direction.IN?[{locationId:line.locationId,itemId:line.itemId}]:[]));
+          await this.reservations.reserveDocument(qr,id);
+        } catch (error) {
+          const detail = error instanceof BusinessException ? error.details as any : undefined;
+          if (doc.document_type === DocumentType.FINISHED_INBOUND && detail?.locationId) {
+            const index = operationLines.findIndex((line: any) => line.locationId === detail.locationId);
+            if (index >= 0) throw this.lineError(index, error instanceof BusinessException && error.errorCode === 'LOCATION_CAPACITY_EXCEEDED' ? 'quantity' : 'locationId', error instanceof BusinessException ? error.errorCode : 'LOCATION_OPERATION_DENIED', error instanceof Error ? error.message : '入库位置当前不可用', detail);
+          }
+          throw error;
+        }
       }
       await qr.query(`UPDATE stock_documents SET status='SUBMITTED',submitted_by=$1,submitted_by_user_id=$1,
         submitted_by_username=(SELECT username FROM users WHERE id=$1),submitted_by_name=(SELECT name FROM users WHERE id=$1),
@@ -142,7 +164,7 @@ export class StockDocumentsService {
         GROUP BY warehouse_id,location_id,item_id
       )
       SELECT l.id "locationId",z.id "zoneId",z.code "zoneCode",z.name "zoneName",
-        l.code "locationCode",l.name "locationName",cap.capacity::text "capacityQty",
+        l.code "locationCode",l.code "locationDisplayName",l.name "locationName",NULLIF(z.actual_location,'未填写') "actualPosition",cap.capacity::text "capacityQty",
         COALESCE(sum(sb.on_hand_qty),0)::numeric(18,0)::text "onHandQty",
         COALESCE(sum(sb.frozen_qty),0)::numeric(18,0)::text "frozenQty",
         COALESCE(sum(res.quantity),0)::numeric(18,0)::text "reservedQty",
@@ -190,7 +212,163 @@ export class StockDocumentsService {
     return { warehouse, item, purpose: q.purpose, locations: result };
   }
 
-  async sourceItemOptions(q: { warehouseId: string; purpose: 'OUTBOUND' | 'MOVE_SOURCE'; keyword?: string; page?: string; pageSize?: string }, user: AuthUser) {
+  /** Fast path: starts from the selected item's balances instead of scanning every selectable location. */
+  async finishedInboundDistribution(itemId: string, user: AuthUser, suggestedLocationId?: string) {
+    const started = performance.now();
+    const { item, locations } = await this.finishedInboundLocations(itemId, user, { onlyStock: true });
+    const rows = locations;
+    const recommended = rows.find((row: any) => row.canInbound && row.state === 'NORMAL' && (row.remainingCapacityQty === null || new Decimal(row.remainingCapacityQty).gt(0)));
+    const suggestedLocation = suggestedLocationId
+      ? (await this.finishedInboundLocations(itemId, user, { locationId: suggestedLocationId })).locations.find((row: any) => row.canInbound) || null
+      : null;
+    this.logFinishedInboundQuery('distribution', started, rows.length);
+    return { item, hasInventory: rows.length > 0, suggestedLocation, locations: rows.map((row: any) => ({ ...row, recommended: row.locationId === recommended?.locationId })) };
+  }
+
+  async finishedInboundLocationTree(q: { itemId: string; keyword?: string; filter?: 'ALL' | 'NORMAL' | 'AVAILABLE_CAPACITY' | 'EMPTY'; level?: 'ROOT' | 'ZONE' | 'LOCATION' | 'SEARCH'; warehouseId?: string; zoneId?: string }, user: AuthUser) {
+    const started = performance.now();
+    if (q.level === 'ROOT') {
+      const item = await this.finishedInboundItem(q.itemId);
+      const ids = await this.warehouseAccess.getAccessibleWarehouseIds(user);
+      const nodes = await this.db.query(`SELECT w.id,w.warehouse_code code,COALESCE(w.display_name,w.name) name,count(DISTINCT z.id)::int "zoneCount",count(l.id)::int "locationCount"
+        FROM warehouses w JOIN warehouse_zones z ON z.warehouse_id=w.id AND z.status='ACTIVE' AND z.deleted_at IS NULL
+        JOIN warehouse_locations l ON l.zone_id=z.id AND l.status='ACTIVE' AND l.is_archived=false
+        WHERE w.warehouse_type='FG' AND w.status='ACTIVE' AND w.deleted_at IS NULL AND ($1::uuid[] IS NULL OR w.id=ANY($1::uuid[]))
+        GROUP BY w.id,w.warehouse_code,w.display_name,w.name ORDER BY w.warehouse_code`, [ids]);
+      this.logFinishedInboundQuery('location-tree', started, nodes.length);
+      return { item, nodes };
+    }
+    const { item, locations } = await this.finishedInboundLocations(q.itemId, user, { warehouseId: q.warehouseId, zoneId: q.zoneId });
+    const keyword = q.keyword?.trim().toLowerCase();
+    const filter = q.filter || 'ALL';
+    const filtered = locations.filter((row: any) => {
+      const searchText = [row.warehouseCode,row.warehouseName,row.zoneCode,row.zoneName,row.locationCode,row.locationName,item.itemCode,item.name].filter(Boolean).join(' ').toLowerCase();
+      if (keyword && !searchText.includes(keyword)) return false;
+      if (filter === 'NORMAL') return row.state === 'NORMAL';
+      if (filter === 'AVAILABLE_CAPACITY') return row.canInbound && (row.remainingCapacityQty === null || new Decimal(row.remainingCapacityQty).gt(0));
+      if (filter === 'EMPTY') return row.isEmpty;
+      return true;
+    });
+    const warehouseMap = new Map<string, any>();
+    for (const location of filtered) {
+      if (!warehouseMap.has(location.warehouseId)) warehouseMap.set(location.warehouseId, { id: location.warehouseId, code: location.warehouseCode, name: location.warehouseName, zones: [] });
+      const warehouse = warehouseMap.get(location.warehouseId);
+      let zone = warehouse.zones.find((row: any) => row.id === location.zoneId);
+      if (!zone) { zone = { id: location.zoneId, code: location.zoneCode, name: location.zoneName, locations: [] }; warehouse.zones.push(zone); }
+      zone.locations.push(location);
+    }
+    const warehouses = [...warehouseMap.values()].map((warehouse: any) => ({ ...warehouse, zoneCount: warehouse.zones.length, locationCount: warehouse.zones.reduce((sum: number, zone: any) => sum + zone.locations.length, 0), zones: warehouse.zones.map((zone: any) => ({ ...zone, locationCount: zone.locations.length })) }));
+    if (q.level === 'ZONE') {
+      const nodes = warehouses.flatMap((warehouse: any) => warehouse.zones);
+      this.logFinishedInboundQuery('location-tree', started, nodes.length);
+      return { item, nodes };
+    }
+    if (q.level === 'LOCATION') {
+      const nodes = warehouses.flatMap((warehouse: any) => warehouse.zones.flatMap((zone: any) => zone.locations));
+      this.logFinishedInboundQuery('location-tree', started, nodes.length);
+      return { item, nodes };
+    }
+    this.logFinishedInboundQuery('location-tree', started, filtered.length);
+    return { item, warehouses };
+  }
+
+  /** Shared target-location read model for raw inbound, move targets and positive adjustments. */
+  async targetLocationTree(q: { itemId: string; keyword?: string; filter?: 'ALL' | 'NORMAL' | 'AVAILABLE_CAPACITY' | 'EMPTY'; warehouseId?: string; zoneId?: string; locationId?: string; excludeWarehouseId?: string; excludeLocationId?: string }, user: AuthUser) {
+    const [item] = await this.db.query(`SELECT id,item_code "itemCode",name,unit,item_type "itemType",minimum_stock "minimumStock" FROM items WHERE id=$1 AND status='ACTIVE' AND deleted_at IS NULL`, [q.itemId]);
+    if (!item || ![ItemType.MATERIAL, ItemType.FINISHED_GOOD].includes(item.itemType)) throw new BusinessException('VALIDATION_ERROR', '请选择启用的原材料或成品物料');
+    const ids = await this.warehouseAccess.getAccessibleWarehouseIds(user);
+    const warehouseType = warehouseTypeForItem(item.itemType);
+    const rows = await this.db.query(`WITH balance AS (
+        SELECT warehouse_id,location_id,sum(on_hand_qty)::numeric(18,0) on_hand FROM stock_balances WHERE item_id=$1 GROUP BY warehouse_id,location_id
+      ), incoming AS (
+        SELECT warehouse_id,location_id,sum(quantity)::numeric(18,0) quantity FROM location_capacity_reservations WHERE item_id=$1 AND status='ACTIVE' GROUP BY warehouse_id,location_id
+      ) SELECT w.id "warehouseId",w.warehouse_code "warehouseCode",COALESCE(w.display_name,w.name) "warehouseName",z.id "zoneId",z.code "zoneCode",z.name "zoneName",NULLIF(z.actual_location,'未填写') "actualPosition",z.status "zoneStatus",l.id "locationId",l.code "locationCode",l.code "locationDisplayName",l.name "locationName",l.status "locationStatus",l.is_archived "isArchived",COALESCE(balance.on_hand,0)::text "onHandQty",COALESCE(incoming.quantity,0)::text "pendingInboundQty",cap.capacity::text "capacityQty",rule.allowed "itemAllowed",EXISTS(SELECT 1 FROM warehouse_operation_locks lock WHERE lock.status='ACTIVE' AND lock.warehouse_id=w.id AND (lock.scope_type='WAREHOUSE' OR lock.zone_id=z.id OR lock.location_id=l.id)) "locked"
+      FROM warehouse_locations l JOIN warehouse_zones z ON z.id=l.zone_id JOIN warehouses w ON w.id=l.warehouse_id
+      LEFT JOIN balance ON balance.warehouse_id=w.id AND balance.location_id=l.id LEFT JOIN incoming ON incoming.warehouse_id=w.id AND incoming.location_id=l.id
+      LEFT JOIN location_item_capacities cap ON cap.location_id=l.id AND cap.item_id=$1 LEFT JOIN location_item_rules rule ON rule.location_id=l.id AND rule.item_id=$1
+      WHERE w.warehouse_type=$2 AND w.status='ACTIVE' AND w.deleted_at IS NULL AND z.status='ACTIVE' AND z.deleted_at IS NULL AND ($3::uuid[] IS NULL OR w.id=ANY($3::uuid[])) AND ($4::uuid IS NULL OR w.id=$4) AND ($5::uuid IS NULL OR z.id=$5) AND ($6::uuid IS NULL OR l.id=$6) AND ($7::uuid IS NULL OR w.id<>$7) AND ($8::uuid IS NULL OR l.id<>$8) ORDER BY w.warehouse_code,z.code,l.code`, [q.itemId, warehouseType, ids, q.warehouseId || null, q.zoneId || null, q.locationId || null, q.excludeWarehouseId || null, q.excludeLocationId || null]);
+    const keyword = q.keyword?.trim().toLowerCase(); const filter = q.filter || 'ALL';
+    const locations = rows.map((row: any) => {
+      const onHand = new Decimal(row.onHandQty || 0), pending = new Decimal(row.pendingInboundQty || 0), capacity = row.capacityQty === null ? null : new Decimal(row.capacityQty);
+      const remaining = capacity === null ? null : Decimal.max(capacity.sub(onHand).sub(pending), 0).toFixed(0);
+      const disabled = row.locationStatus !== 'ACTIVE' || row.zoneStatus !== 'ACTIVE' || row.isArchived;
+      const full = capacity !== null && new Decimal(remaining || 0).lte(0);
+      const state = disabled ? 'DISABLED' : full ? 'FULL' : row.locked ? 'LOCKED' : capacity !== null && onHand.add(pending).div(capacity).gte(.8) ? 'WARNING' : onHand.eq(0) ? 'EMPTY' : 'NORMAL';
+      const disabledReason = disabled ? '库位已停用' : full ? '已满库' : row.locked ? '库存作业已锁定' : row.itemAllowed === false ? '该物料不允许存放于此库位' : null;
+      return { ...row, onHandQty: onHand.toFixed(0), remainingCapacityQty: remaining, state, isEmpty: onHand.eq(0), canInbound: !disabledReason, disabledReason };
+    }).filter((row: any) => {
+      const text = [row.warehouseCode,row.warehouseName,row.zoneCode,row.zoneName,row.locationCode,row.locationName,item.itemCode,item.name].join(' ').toLowerCase();
+      return (!keyword || text.includes(keyword)) && (filter !== 'NORMAL' || row.state === 'NORMAL') && (filter !== 'AVAILABLE_CAPACITY' || row.canInbound) && (filter !== 'EMPTY' || row.isEmpty);
+    });
+    const warehouseMap = new Map<string, any>();
+    for (const location of locations) { if (!warehouseMap.has(location.warehouseId)) warehouseMap.set(location.warehouseId,{ id: location.warehouseId, code: location.warehouseCode, name: location.warehouseName, zones: [] }); const warehouse=warehouseMap.get(location.warehouseId); let zone=warehouse.zones.find((value:any)=>value.id===location.zoneId); if(!zone){zone={id:location.zoneId,code:location.zoneCode,name:location.zoneName,locations:[]};warehouse.zones.push(zone);} zone.locations.push(location); }
+    return { item, warehouses: [...warehouseMap.values()] };
+  }
+
+  private logFinishedInboundQuery(type: 'distribution' | 'location-tree', started: number, resultCount: number) {
+    const durationMs = performance.now() - started;
+    if (durationMs > 250) console.warn(JSON.stringify({ event: 'slow_finished_inbound_query', type, durationMs: Math.round(durationMs), resultCount }));
+  }
+
+  private async finishedInboundItem(itemId: string) {
+    const [item] = await this.db.query(`SELECT id,item_code "itemCode",name,unit,minimum_stock "minimumStock",enable_batch "enableBatch" FROM items WHERE id=$1 AND item_type='FINISHED_GOOD' AND status='ACTIVE' AND deleted_at IS NULL`, [itemId]);
+    if (!item) throw new BusinessException('VALIDATION_ERROR', '请选择启用的成品物料');
+    return item;
+  }
+
+  private async finishedInboundLocations(itemId: string, user: AuthUser, options: { onlyStock?: boolean; warehouseId?: string; zoneId?: string; locationId?: string } = {}) {
+    const item = await this.finishedInboundItem(itemId);
+    const ids = await this.warehouseAccess.getAccessibleWarehouseIds(user);
+    const locationStockCte = options.onlyStock ? '' : `, location_stock AS (
+        SELECT location_id,sum(on_hand_qty)::numeric(18,0) quantity FROM stock_balances GROUP BY location_id
+      )`;
+    const locationStockJoin = options.onlyStock ? '' : 'LEFT JOIN location_stock ON location_stock.location_id=l.id';
+    const locationOnHand = options.onlyStock ? 'COALESCE(balance.on_hand,0)' : 'COALESCE(location_stock.quantity,0)';
+    const rows = await this.db.query(`
+      WITH balance AS (
+        SELECT warehouse_id,location_id,sum(on_hand_qty)::numeric(18,0) on_hand,sum(frozen_qty)::numeric(18,0) frozen
+        FROM stock_balances WHERE item_id=$1 GROUP BY warehouse_id,location_id
+      ), reserved AS (
+        SELECT warehouse_id,location_id,sum(quantity)::numeric(18,0) quantity
+        FROM stock_reservations WHERE item_id=$1 AND status='ACTIVE' GROUP BY warehouse_id,location_id
+      ), incoming AS (
+        SELECT warehouse_id,location_id,sum(quantity)::numeric(18,0) quantity
+        FROM location_capacity_reservations WHERE item_id=$1 AND status='ACTIVE' GROUP BY warehouse_id,location_id
+      ) ${locationStockCte}
+      SELECT w.id "warehouseId",w.warehouse_code "warehouseCode",COALESCE(w.display_name,w.name) "warehouseName",
+        z.id "zoneId",z.code "zoneCode",z.name "zoneName",z.status "zoneStatus",
+        l.id "locationId",l.code "locationCode",l.code "locationDisplayName",l.name "locationName",NULLIF(z.actual_location,'未填写') "actualPosition",l.status "locationStatus",l.is_archived "isArchived",
+        COALESCE(balance.on_hand,0)::text "onHandQty",COALESCE(balance.frozen,0)::text "frozenQty",COALESCE(reserved.quantity,0)::text "reservedQty",COALESCE(incoming.quantity,0)::text "pendingInboundQty",${locationOnHand}::text "locationOnHandQty",
+        cap.capacity::text "capacityQty",rule.allowed "itemAllowed",
+        EXISTS(SELECT 1 FROM warehouse_operation_locks lock WHERE lock.status='ACTIVE' AND lock.warehouse_id=w.id AND (lock.scope_type='WAREHOUSE' OR lock.zone_id=z.id OR lock.location_id=l.id)) "locked"
+      FROM warehouse_locations l
+      JOIN warehouse_zones z ON z.id=l.zone_id
+      JOIN warehouses w ON w.id=l.warehouse_id
+      LEFT JOIN balance ON balance.warehouse_id=w.id AND balance.location_id=l.id
+      LEFT JOIN reserved ON reserved.warehouse_id=w.id AND reserved.location_id=l.id
+      LEFT JOIN incoming ON incoming.warehouse_id=w.id AND incoming.location_id=l.id
+      ${locationStockJoin}
+      LEFT JOIN location_item_capacities cap ON cap.location_id=l.id AND cap.item_id=$1
+      LEFT JOIN location_item_rules rule ON rule.location_id=l.id AND rule.item_id=$1
+      WHERE w.warehouse_type='FG' AND w.deleted_at IS NULL AND ($2::uuid[] IS NULL OR w.id=ANY($2::uuid[]))
+        AND ($3::uuid IS NULL OR w.id=$3) AND ($4::uuid IS NULL OR z.id=$4) AND ($5::uuid IS NULL OR l.id=$5) ${options.onlyStock ? 'AND COALESCE(balance.on_hand,0)>0' : ''}
+      ORDER BY w.warehouse_code,z.code,l.code`, [itemId, ids, options.warehouseId || null, options.zoneId || null, options.locationId || null]);
+    const locations = rows.map((row: any) => {
+      const onHand = new Decimal(row.onHandQty || 0), pending = new Decimal(row.pendingInboundQty || 0);
+      const capacity = row.capacityQty === null ? null : new Decimal(row.capacityQty);
+      const remaining = capacity === null ? null : Decimal.max(capacity.sub(onHand).sub(pending), 0).toFixed(0);
+      const disabled = row.locationStatus !== 'ACTIVE' || row.zoneStatus !== 'ACTIVE' || row.isArchived;
+      const full = capacity !== null && new Decimal(remaining || 0).lte(0);
+      const warning = capacity !== null && onHand.add(pending).div(capacity).gte(.8);
+      const low = onHand.gt(0) && onHand.lte(new Decimal(item.minimumStock || 0));
+      const state = disabled ? 'DISABLED' : full ? 'FULL' : row.locked ? 'LOCKED' : warning ? 'WARNING' : low ? 'LOW' : onHand.gt(0) ? 'NORMAL' : 'EMPTY';
+      const disabledReason = disabled ? '库位已停用' : full ? '已满库' : row.locked ? '库存作业已锁定' : row.itemAllowed === false ? '该物料不允许存放于此库位' : null;
+      return { ...row, onHandQty: onHand.toFixed(0), frozenQty: String(row.frozenQty || 0), reservedQty: String(row.reservedQty || 0), pendingInboundQty: pending.toFixed(0), availableQty: Decimal.max(onHand.sub(row.frozenQty || 0).sub(row.reservedQty || 0), 0).toFixed(0), remainingCapacityQty: remaining, usageRate: capacity === null ? null : onHand.add(pending).div(capacity).mul(100).toDecimalPlaces(1).toFixed(1), state, isEmpty: new Decimal(row.locationOnHandQty || 0).eq(0), canInbound: !disabledReason, disabledReason };
+    });
+    return { item, locations };
+  }
+
+  async sourceItemOptions(q: { warehouseId: string; purpose: 'OUTBOUND' | 'MOVE_SOURCE'; zoneId?: string; locationId?: string; keyword?: string; page?: string; pageSize?: string }, user: AuthUser) {
     if (!['OUTBOUND', 'MOVE_SOURCE'].includes(q.purpose)) throw new BusinessException('VALIDATION_ERROR', '来源物料查询用途无效');
     await this.warehouseAccess.assertWarehouse(user, q.warehouseId);
     const [warehouse] = await this.db.query(`SELECT id,warehouse_code "warehouseCode",name,warehouse_type "warehouseType" FROM warehouses WHERE id=$1 AND status='ACTIVE' AND deleted_at IS NULL`, [q.warehouseId]);
@@ -219,9 +397,10 @@ export class StockDocumentsService {
           count(*) FILTER (WHERE sb.on_hand_qty-COALESCE(sb.frozen_qty,0)-COALESCE(res.quantity,0)>0)::int "batchCount"
         FROM stock_balances sb
         JOIN warehouse_locations l ON l.id=sb.location_id AND l.status='ACTIVE' AND l.is_archived=false
+        JOIN warehouse_zones z ON z.id=l.zone_id AND z.status='ACTIVE' AND z.deleted_at IS NULL
         LEFT JOIN reserved res ON res.warehouse_id=sb.warehouse_id AND res.location_id=sb.location_id
           AND res.item_id=sb.item_id AND res.batch_id IS NOT DISTINCT FROM sb.batch_id
-        WHERE sb.warehouse_id=$1
+        WHERE sb.warehouse_id=$1 AND ($4::uuid IS NULL OR z.id=$4) AND ($5::uuid IS NULL OR l.id=$5)
         GROUP BY sb.item_id
       )
       SELECT i.id "itemId",i.item_code "itemCode",i.name,i.model,i.unit,
@@ -232,9 +411,45 @@ export class StockDocumentsService {
       WHERE i.status='ACTIVE' AND i.deleted_at IS NULL AND i.item_type=$2
         AND inv."availableQty">0
         AND ($3::text IS NULL OR i.item_code ILIKE '%' || $3 || '%' OR i.name ILIKE '%' || $3 || '%' OR COALESCE(i.model,'') ILIKE '%' || $3 || '%')`;
-    const [{ total }] = await this.db.query(`SELECT count(*)::int total FROM (${sourceSql}) candidates`, [q.warehouseId, itemType, keyword]);
-    const items = await this.db.query(`${sourceSql} ORDER BY "itemCode" LIMIT $4 OFFSET $5`, [q.warehouseId, itemType, keyword, pageSize, (page - 1) * pageSize]);
+    const parameters = [q.warehouseId, itemType, keyword, q.zoneId || null, q.locationId || null];
+    const [{ total }] = await this.db.query(`SELECT count(*)::int total FROM (${sourceSql}) candidates`, parameters);
+    const items = await this.db.query(`${sourceSql} ORDER BY "itemCode" LIMIT $6 OFFSET $7`, [...parameters, pageSize, (page - 1) * pageSize]);
     return { items, total: Number(total || 0), page, pageSize, warehouse };
+  }
+
+  /** Item-first source lookup for outbound and move. Returns only real, usable stock locations. */
+  async sourceItemDistribution(itemId: string, user: AuthUser, scope: { warehouseId?: string; zoneId?: string; locationId?: string } = {}) {
+    const [item] = await this.db.query(`SELECT id,item_code "itemCode",name,model,unit,item_type "itemType" FROM items WHERE id=$1 AND status='ACTIVE' AND deleted_at IS NULL`, [itemId]);
+    if (!item) throw new BusinessException('VALIDATION_ERROR', '物料不存在或已停用');
+    const warehouseType = warehouseTypeForItem(item.itemType);
+    if (scope.warehouseId) await this.warehouseAccess.assertWarehouse(user, scope.warehouseId);
+    const ids = scope.warehouseId ? [scope.warehouseId] : await this.warehouseAccess.getAccessibleWarehouseIds(user);
+    const rows = await this.db.query(`WITH reserved AS (
+        SELECT warehouse_id,location_id,item_id,batch_id,sum(quantity)::numeric(18,0) quantity FROM stock_reservations
+        WHERE status='ACTIVE' GROUP BY warehouse_id,location_id,item_id,batch_id
+      ) SELECT w.id "warehouseId",w.warehouse_code "warehouseCode",COALESCE(w.display_name,w.name) "warehouseName",
+        z.id "zoneId",z.code "zoneCode",z.name "zoneName",NULLIF(z.actual_location,'未填写') "actualPosition",l.id "locationId",l.code "locationCode",l.code "locationDisplayName",l.name "locationName",
+        sb.batch_id "batchId",b.batch_no "batchNo",sb.on_hand_qty::text "onHandQty",COALESCE(sb.frozen_qty,0)::text "frozenQty",COALESCE(r.quantity,0)::text "reservedQty",
+        GREATEST(sb.on_hand_qty-COALESCE(sb.frozen_qty,0)-COALESCE(r.quantity,0),0)::text "availableQty",
+        EXISTS(SELECT 1 FROM warehouse_operation_locks ol WHERE ol.status='ACTIVE' AND ol.warehouse_id=w.id AND (ol.scope_type='WAREHOUSE' OR ol.zone_id=z.id OR ol.location_id=l.id)) "locked"
+      FROM stock_balances sb JOIN warehouse_locations l ON l.id=sb.location_id AND l.warehouse_id=sb.warehouse_id AND l.status='ACTIVE' AND l.is_archived=false
+      JOIN warehouse_zones z ON z.id=l.zone_id JOIN warehouses w ON w.id=sb.warehouse_id
+      LEFT JOIN inventory_batches b ON b.id=sb.batch_id LEFT JOIN reserved r ON r.warehouse_id=sb.warehouse_id AND r.location_id=sb.location_id AND r.item_id=sb.item_id AND r.batch_id IS NOT DISTINCT FROM sb.batch_id
+      WHERE sb.item_id=$1 AND w.warehouse_type=$2 AND w.status='ACTIVE' AND w.deleted_at IS NULL AND z.status='ACTIVE' AND z.deleted_at IS NULL
+        AND ($3::uuid[] IS NULL OR w.id=ANY($3::uuid[])) AND ($4::uuid IS NULL OR z.id=$4) AND ($5::uuid IS NULL OR l.id=$5)
+        AND sb.on_hand_qty-COALESCE(sb.frozen_qty,0)-COALESCE(r.quantity,0)>0
+      ORDER BY w.warehouse_code,z.code,l.code,b.batch_no NULLS FIRST`, [itemId, warehouseType, ids, scope.zoneId || null, scope.locationId || null]);
+    const locations = new Map<string, any>();
+    for (const row of rows) {
+      const current = locations.get(row.locationId) || { ...row, onHandQty: '0', frozenQty: '0', reservedQty: '0', availableQty: '0', batches: [], canSource: !row.locked };
+      current.onHandQty = new Decimal(current.onHandQty).add(row.onHandQty || 0).toFixed(0);
+      current.frozenQty = new Decimal(current.frozenQty).add(row.frozenQty || 0).toFixed(0);
+      current.reservedQty = new Decimal(current.reservedQty).add(row.reservedQty || 0).toFixed(0);
+      current.availableQty = new Decimal(current.availableQty).add(row.availableQty || 0).toFixed(0);
+      current.batches.push({ batchId: row.batchId, batchNo: row.batchNo, onHandQty: row.onHandQty, frozenQty: row.frozenQty, reservedQty: row.reservedQty, availableQty: row.availableQty });
+      locations.set(row.locationId, current);
+    }
+    return { item, hasInventory: locations.size > 0, locations: [...locations.values()] };
   }
 
   private async createApprovalTask(qr: QueryRunner, documentId: string, applicantId: string) {
@@ -271,7 +486,18 @@ export class StockDocumentsService {
       const [doc] = await qr.query(`SELECT document_type,status FROM stock_documents WHERE id=$1 FOR UPDATE`, [id]);
       if (!doc) throw new BusinessException('NOT_FOUND', '库存单据不存在');
       if ([DocumentType.MATERIAL_INBOUND, DocumentType.FINISHED_INBOUND, DocumentType.PRODUCTION_RETURN, DocumentType.PRODUCTION_COMPLETION].includes(doc.document_type)) await this.saveReceiptAllocations(qr, id, dto?.receiptAllocations);
-      const result = await this.applyAndFinalize(qr, id, userId, ['SUBMITTED']);
+      let result: any;
+      try {
+        result = await this.applyAndFinalize(qr, id, userId, ['SUBMITTED']);
+      } catch (error) {
+        const detail = error instanceof BusinessException ? error.details as any : undefined;
+        if (doc.document_type === DocumentType.FINISHED_INBOUND && detail?.locationId) {
+          const lines = await qr.query(`SELECT location_id "locationId" FROM stock_document_lines WHERE document_id=$1 ORDER BY id`, [id]);
+          const index = lines.findIndex((line: any) => line.locationId === detail.locationId);
+          if (index >= 0) throw this.lineError(index, error instanceof BusinessException && error.errorCode === 'LOCATION_CAPACITY_EXCEEDED' ? 'quantity' : 'locationId', error instanceof BusinessException ? error.errorCode : 'LOCATION_OPERATION_DENIED', error instanceof Error ? error.message : '入库位置当前不可用', detail);
+        }
+        throw error;
+      }
       await this.approvalHistory.record(qr,id,'APPROVED','SUBMITTED','POSTED',userId,{ ...context, idempotencyKey:key }); await this.finishApprovalTask(qr,id,userId,'APPROVED'); return result;
     });
   }
@@ -325,6 +551,32 @@ export class StockDocumentsService {
 
   async createAdjustment(dto: any, user: AuthUser) { const lines = dto.lines.map((line: any) => { const value = new Decimal(line.adjustmentQty); if (!value.isFinite() || value.isZero() || !value.isInteger()) throw new BusinessException('VALIDATION_ERROR', '调整数量必须是非零整数'); return { ...line, quantity: value.abs().toFixed(0), direction: value.isPositive() ? Direction.IN : Direction.OUT }; }); return this.create(DocumentType.INVENTORY_ADJUSTMENT, { ...dto, lines }, user); }
 
+  /** Returns the immutable stock snapshot used to build a location-first stock check. */
+  async stockCheckCandidates(q: { warehouseId: string; zoneId?: string; locationId?: string; itemId?: string }, user: AuthUser) {
+    await this.warehouseAccess.assertWarehouse(user, q.warehouseId);
+    const rows = await this.db.query(`
+      SELECT sb.warehouse_id "warehouseId",z.id "zoneId",z.code "zoneCode",z.name "zoneName",
+        l.id "locationId",l.code "locationCode",l.code "locationDisplayName",l.name "locationName",NULLIF(z.actual_location,'未填写') "actualPosition",
+        i.id "itemId",i.item_code "itemCode",i.name "itemName",i.model,i.unit,
+        sb.batch_id "batchId",b.batch_no "batchNo",sb.on_hand_qty::text "onHandQty"
+      FROM stock_balances sb
+      JOIN warehouse_locations l ON l.id=sb.location_id AND l.warehouse_id=sb.warehouse_id
+        AND l.status='ACTIVE' AND l.is_archived=false
+      JOIN warehouse_zones z ON z.id=l.zone_id AND z.status='ACTIVE' AND z.deleted_at IS NULL
+      JOIN items i ON i.id=sb.item_id AND i.status='ACTIVE' AND i.deleted_at IS NULL
+      LEFT JOIN inventory_batches b ON b.id=sb.batch_id
+      WHERE sb.warehouse_id=$1 AND ($2::uuid IS NULL OR z.id=$2)
+        AND ($3::uuid IS NULL OR l.id=$3) AND ($4::uuid IS NULL OR i.id=$4)
+        AND sb.on_hand_qty>0
+        AND NOT EXISTS(
+          SELECT 1 FROM warehouse_operation_locks lock WHERE lock.status='ACTIVE' AND lock.warehouse_id=sb.warehouse_id
+            AND (lock.scope_type='WAREHOUSE' OR lock.zone_id=z.id OR lock.location_id=l.id)
+        )
+      ORDER BY z.code,l.code,i.item_code,b.batch_no NULLS FIRST`,
+      [q.warehouseId, q.zoneId || null, q.locationId || null, q.itemId || null]);
+    return { lines: rows };
+  }
+
   async createStockCheck(dto: any, user: AuthUser) {
     if (!dto.warehouseId || !Array.isArray(dto.lines) || !dto.lines.length) throw new BusinessException('VALIDATION_ERROR', '请选择仓库并填写盘点明细');
     await this.warehouseAccess.assertWarehouse(user,dto.warehouseId);
@@ -356,9 +608,10 @@ export class StockDocumentsService {
     if (!['INBOUND','OUTBOUND','MOVE'].includes(operation) || !dto.warehouseId || !Array.isArray(dto.lines) || !dto.lines.length) throw new BusinessException('VALIDATION_ERROR','自动分配参数不完整');
     const targetWarehouseId=dto.targetWarehouseId||dto.warehouseId;
     await this.warehouseAccess.assertWarehouses(user,operation==='MOVE'?[dto.warehouseId,targetWarehouseId]:[dto.warehouseId]);
-    if (operation==='MOVE' && targetWarehouseId!==dto.warehouseId) {
-      const warehouses=await this.db.query(`SELECT id,warehouse_type FROM warehouses WHERE id=ANY($1::uuid[]) AND status='ACTIVE' AND deleted_at IS NULL`,[[dto.warehouseId,targetWarehouseId]]);
-      if(warehouses.length!==2||warehouses[0].warehouse_type!==warehouses[1].warehouse_type) throw new BusinessException('VALIDATION_ERROR','跨仓调拨只允许同仓型仓库');
+    if (operation==='MOVE') {
+      const warehouseIds=[...new Set([dto.warehouseId,targetWarehouseId])];
+      const warehouses=await this.db.query(`SELECT id,warehouse_type FROM warehouses WHERE id=ANY($1::uuid[]) AND status='ACTIVE' AND deleted_at IS NULL`,[warehouseIds]);
+      if(warehouses.length!==warehouseIds.length||new Set(warehouses.map((warehouse:any)=>warehouse.warehouse_type)).size!==1) throw new BusinessException('VALIDATION_ERROR','移库只允许在同仓型仓库间进行');
     }
     const allocations:any[]=[];
     for(const input of dto.lines){
@@ -366,7 +619,7 @@ export class StockDocumentsService {
       let sources:any[]=[],sourceAllocations:any[]=[];
       if(operation!=='INBOUND'){
         sources=await this.db.query(`WITH reserved AS (SELECT warehouse_id,location_id,item_id,batch_id,sum(quantity) qty FROM stock_reservations WHERE status='ACTIVE' GROUP BY warehouse_id,location_id,item_id,batch_id)
-          SELECT sb.location_id "locationId",sb.batch_id "batchId",l.code "locationCode",z.code "zoneCode",COALESCE(b.batch_no,'') "batchNo",GREATEST(sb.on_hand_qty-COALESCE(sb.frozen_qty,0)-COALESCE(r.qty,0),0)::numeric(18,0)::text available
+          SELECT sb.location_id "locationId",sb.batch_id "batchId",l.code "locationCode",l.code "locationDisplayName",NULLIF(z.actual_location,'未填写') "actualPosition",z.code "zoneCode",COALESCE(b.batch_no,'') "batchNo",GREATEST(sb.on_hand_qty-COALESCE(sb.frozen_qty,0)-COALESCE(r.qty,0),0)::numeric(18,0)::text available
           FROM stock_balances sb JOIN warehouse_locations l ON l.id=sb.location_id JOIN warehouse_zones z ON z.id=l.zone_id LEFT JOIN inventory_batches b ON b.id=sb.batch_id LEFT JOIN reserved r ON r.warehouse_id=sb.warehouse_id AND r.location_id=sb.location_id AND r.item_id=sb.item_id AND r.batch_id IS NOT DISTINCT FROM sb.batch_id
           WHERE sb.warehouse_id=$1 AND sb.item_id=$2 AND l.status='ACTIVE' AND l.is_archived=false AND ($3::uuid IS NULL OR l.zone_id=$3) AND ($4::uuid IS NULL OR l.id=$4)
           AND NOT EXISTS(SELECT 1 FROM warehouse_operation_locks ol WHERE ol.status='ACTIVE' AND ol.warehouse_id=l.warehouse_id AND (ol.scope_type='WAREHOUSE' OR ol.zone_id=l.zone_id OR ol.location_id=l.id))
@@ -391,7 +644,7 @@ export class StockDocumentsService {
 
   private async targetCandidates(warehouseId:string,itemId:string,zoneId?:string,locationId?:string,exclude:string[]=[]){
     return this.db.query(`WITH stock AS (SELECT location_id,sum(on_hand_qty) qty FROM stock_balances WHERE item_id=$2 GROUP BY location_id),incoming AS (SELECT location_id,sum(quantity) qty FROM location_capacity_reservations WHERE item_id=$2 AND status='ACTIVE' GROUP BY location_id)
-      SELECT l.id "locationId",l.code "locationCode",z.code "zoneCode",COALESCE(s.qty,0)::text "onHandQty",cap.capacity::text "capacityQty",CASE WHEN cap.capacity IS NULL THEN NULL ELSE GREATEST(cap.capacity-COALESCE(s.qty,0)-COALESCE(inc.qty,0),0)::text END "remainingQty",(COALESCE(s.qty,0)>0) "hasItem"
+      SELECT l.id "locationId",l.code "locationCode",l.code "locationDisplayName",NULLIF(z.actual_location,'未填写') "actualPosition",z.code "zoneCode",COALESCE(s.qty,0)::text "onHandQty",cap.capacity::text "capacityQty",CASE WHEN cap.capacity IS NULL THEN NULL ELSE GREATEST(cap.capacity-COALESCE(s.qty,0)-COALESCE(inc.qty,0),0)::text END "remainingQty",(COALESCE(s.qty,0)>0) "hasItem"
       FROM warehouse_locations l JOIN warehouse_zones z ON z.id=l.zone_id LEFT JOIN stock s ON s.location_id=l.id LEFT JOIN incoming inc ON inc.location_id=l.id LEFT JOIN location_item_capacities cap ON cap.location_id=l.id AND cap.item_id=$2
       WHERE l.warehouse_id=$1 AND l.status='ACTIVE' AND l.is_archived=false AND ($3::uuid IS NULL OR l.zone_id=$3) AND ($4::uuid IS NULL OR l.id=$4) AND NOT(l.id=ANY($5::uuid[]))
       AND NOT EXISTS(SELECT 1 FROM location_item_rules r WHERE r.location_id=l.id AND r.item_id=$2 AND r.allowed=false)
@@ -472,6 +725,41 @@ export class StockDocumentsService {
 
   private async insertLine(qr: QueryRunner, documentId: string, warehouseId: string, line: any) { const locationId = line.locationId; if (!locationId) throw new BusinessException('VALIDATION_ERROR', '仓库没有可用库位'); await qr.query(`INSERT INTO stock_document_lines(id,document_id,item_id,quantity,direction,location_id,batch_id,target_warehouse_id,target_location_id,target_batch_id,notes) VALUES(gen_random_uuid(),$1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, [documentId, line.itemId, line.quantity, line.direction, locationId, line.batchId || null, line.targetWarehouseId || null, line.targetLocationId || null, line.targetBatchId || null, line.notes || null]); }
 
+  private lineError(index: number, field: string, code: string, message: string, extra: Record<string, unknown> = {}) {
+    return new BusinessException('VALIDATION_ERROR', message, undefined, { lineErrors: [{ index, field, code, message, ...extra }] });
+  }
+
+  private async prepareFinishedInboundLines(qr: QueryRunner, lines: any[], warehouseId: string) {
+    if (!Array.isArray(lines) || !lines.length) throw new BusinessException('VALIDATION_ERROR', '单据至少包含一条明细');
+    const itemIds = [...new Set(lines.map(line => line.itemId).filter(Boolean))];
+    const items = itemIds.length ? await qr.query(`SELECT id,item_type,status,enable_batch "enableBatch" FROM items WHERE id=ANY($1::uuid[]) AND deleted_at IS NULL`, [itemIds]) : [];
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index];
+      const item = items.find((row: any) => row.id === line.itemId);
+      if (!item || item.status !== 'ACTIVE') throw this.lineError(index, 'itemId', 'ITEM_INVALID', '请选择启用的成品物料');
+      if (item.item_type !== ItemType.FINISHED_GOOD) throw this.lineError(index, 'itemId', 'ITEM_TYPE_INVALID', '成品入库只能选择成品物料');
+      if (!line.locationId) throw this.lineError(index, 'locationId', 'LOCATION_REQUIRED', '请选择具体入库库位');
+      const [location] = await qr.query(`SELECT l.id FROM warehouse_locations l JOIN warehouse_zones z ON z.id=l.zone_id WHERE l.id=$1 AND l.warehouse_id=$2 AND l.status='ACTIVE' AND l.is_archived=false AND z.status='ACTIVE' AND z.deleted_at IS NULL`, [line.locationId, warehouseId]);
+      if (!location) throw this.lineError(index, 'locationId', 'LOCATION_INVALID', '入库库位不存在、已停用或不属于当前单据仓库');
+      if (line.batchId && line.batchNo?.trim()) throw this.lineError(index, 'batchId', 'BATCH_AMBIGUOUS', '请选择已有批次或输入新批次号，两者不能同时填写');
+      if (line.batchId) {
+        const [batch] = await qr.query(`SELECT id,status FROM inventory_batches WHERE id=$1 AND item_id=$2`, [line.batchId, line.itemId]);
+        if (!batch || batch.status !== 'ACTIVE') throw this.lineError(index, 'batchId', 'BATCH_INVALID', '批次不存在、已停用或不属于当前物料');
+      } else if (line.batchNo?.trim()) {
+        const batchNo = line.batchNo.trim();
+        const [existing] = await qr.query(`SELECT id,status FROM inventory_batches WHERE item_id=$1 AND batch_no=$2`, [line.itemId, batchNo]);
+        if (existing?.status === 'INACTIVE') throw this.lineError(index, 'batchNo', 'BATCH_INACTIVE', '同名批次已停用，请选择其他批次号');
+        if (existing) line.batchId = existing.id;
+        else {
+          if (!item.enableBatch) throw this.lineError(index, 'batchNo', 'BATCH_NOT_FOUND', '该物料未启用批次管理，只能选择已有批次');
+          const [created] = await qr.query(`INSERT INTO inventory_batches(item_id,batch_no,status) VALUES($1,$2,'ACTIVE') RETURNING id`, [line.itemId, batchNo]);
+          line.batchId = created.id;
+        }
+      } else if (item.enableBatch) throw this.lineError(index, 'batchNo', 'BATCH_REQUIRED', '该物料启用了批次管理，请选择或输入批次号');
+      delete line.batchNo;
+    }
+  }
+
   private async validateManualLines(qr: QueryRunner, type: DocumentType, lines: any[], warehouseId: string) {
     if (!Array.isArray(lines) || !lines.length) throw new BusinessException('VALIDATION_ERROR', '单据至少包含一条明细');
     const ids = lines.map(line => line.itemId);
@@ -482,9 +770,27 @@ export class StockDocumentsService {
       if (items.some((item: any) => item.item_type !== expected)) throw new BusinessException('VALIDATION_ERROR', expected === ItemType.MATERIAL ? '原材料入库只能包含原材料' : '成品入库或出库只能包含成品');
     }
     await this.validateLocations(qr, lines, warehouseId, false);
-    await this.operations?.assertOperationAllowed(qr, lines.map(line => line.locationId), [DocumentType.MATERIAL_INBOUND,DocumentType.FINISHED_INBOUND].includes(type)?lines.map(line => ({ locationId: line.locationId,itemId: line.itemId })):[]);
+    try {
+      await this.operations?.assertOperationAllowed(qr, lines.map(line => line.locationId), [DocumentType.MATERIAL_INBOUND,DocumentType.FINISHED_INBOUND].includes(type)?lines.map(line => ({ locationId: line.locationId,itemId: line.itemId })):[]);
+    } catch (error) {
+      const detail = error instanceof BusinessException ? error.details as any : undefined;
+      if (type === DocumentType.FINISHED_INBOUND && detail?.locationId) {
+        const index = lines.findIndex(line => line.locationId === detail.locationId);
+        if (index >= 0) throw this.lineError(index, 'locationId', error instanceof BusinessException ? error.errorCode : 'LOCATION_OPERATION_DENIED', error instanceof Error ? error.message : '目标库位当前不可入库', detail);
+      }
+      throw error;
+    }
     if ([DocumentType.MATERIAL_INBOUND, DocumentType.FINISHED_INBOUND].includes(type)) {
-      await this.validateCapacityAllocations(qr, lines.map(line => ({ locationId: line.locationId, itemId: line.itemId, quantity: line.quantity })));
+      try {
+        await this.validateCapacityAllocations(qr, lines.map(line => ({ locationId: line.locationId, itemId: line.itemId, quantity: line.quantity })));
+      } catch (error) {
+        const detail = error instanceof BusinessException ? error.details as any : undefined;
+        if (type === DocumentType.FINISHED_INBOUND && detail?.locationId) {
+          const index = lines.findIndex(line => line.locationId === detail.locationId);
+          if (index >= 0) throw this.lineError(index, 'quantity', 'LOCATION_CAPACITY_EXCEEDED', '目标库位剩余容量不足，请调整数量或更换库位', detail);
+        }
+        throw error;
+      }
     }
   }
 
@@ -500,6 +806,7 @@ export class StockDocumentsService {
     if (!sourceWarehouse || !['RAW','FG'].includes(sourceWarehouse.warehouse_type)) throw new BusinessException('VALIDATION_ERROR', '普通移库只支持原材料仓或成品仓');
     const items = await qr.query(`SELECT id,item_type FROM items WHERE id=ANY($1::uuid[])`, [lines.map(line => line.itemId)]);
     for (const line of lines) {
+      if (line.targetLocationId === line.locationId) throw new BusinessException('VALIDATION_ERROR', '移库来源和目标不能相同');
       const item = items.find((row: any) => row.id === line.itemId);
       const [targetWarehouse] = await qr.query(`SELECT warehouse_type FROM warehouses WHERE id=$1 AND status='ACTIVE' AND deleted_at IS NULL`, [line.targetWarehouseId]);
       const expectedType = sourceWarehouse.warehouse_type === 'RAW' ? ItemType.MATERIAL : ItemType.FINISHED_GOOD;
@@ -567,7 +874,8 @@ export class StockDocumentsService {
       const [capacity] = await qr.query(`SELECT capacity FROM location_item_capacities WHERE location_id=$1 AND item_id=$2`, [allocation.locationId, allocation.itemId]);
       if (!capacity) continue;
       const [stock] = await qr.query(`SELECT COALESCE(sum(on_hand_qty),0)::text quantity FROM stock_balances WHERE location_id=$1 AND item_id=$2`, [allocation.locationId, allocation.itemId]);
-      const remaining = new Decimal(capacity.capacity).sub(stock?.quantity || 0);
+      const [incoming] = await qr.query(`SELECT COALESCE(sum(quantity),0)::text quantity FROM location_capacity_reservations WHERE location_id=$1 AND item_id=$2 AND status='ACTIVE'`, [allocation.locationId, allocation.itemId]);
+      const remaining = new Decimal(capacity.capacity).sub(stock?.quantity || 0).sub(incoming?.quantity || 0);
       if (allocation.quantity.gt(remaining)) {
         throw new BusinessException('LOCATION_CAPACITY_EXCEEDED', '目标库位的该物料容量不足，请选择其他库位或拆分数量', undefined, { locationId: allocation.locationId, remainingCapacityQty: Decimal.max(remaining, 0).toFixed(0), requestQty: allocation.quantity.toFixed(0) });
       }
@@ -605,10 +913,10 @@ export class StockDocumentsService {
       SELECT l.id,l.item_id "itemId",i.item_code "itemCode",i.name "itemName",i.item_type "itemType",i.model,i.spec,
         COALESCE(parameters.value,'—') parameters,i.unit,l.quantity,l.direction,l.notes,
         COALESCE(l.source_warehouse_id,d.warehouse_id) "sourceWarehouseId",sw.warehouse_code "sourceWarehouseCode",
-        sz.code "sourceZoneCode",l.location_id "locationId",loc.code "locationCode",
+        sz.code "sourceZoneCode",l.location_id "locationId",loc.code "locationCode",loc.code "locationDisplayName",NULLIF(sz.actual_location,'未填写') "actualPosition",
         l.batch_id "batchId",b.batch_no "batchNo",l.target_warehouse_id "targetWarehouseId",
         tw.warehouse_code "targetWarehouseCode",tz.code "targetZoneCode",
-        l.target_location_id "targetLocationId",tl.code "targetLocationCode",
+        l.target_location_id "targetLocationId",tl.code "targetLocationCode",tl.code "targetLocationDisplayName",NULLIF(tz.actual_location,'未填写') "targetActualPosition",
         l.target_batch_id "targetBatchId",po.order_no "productionOrderNo"
       FROM stock_document_lines l
       JOIN stock_documents d ON d.id=l.document_id
@@ -626,8 +934,8 @@ export class StockDocumentsService {
         FROM material_parameters WHERE material_id=i.id
       ) parameters ON true
       WHERE l.document_id=$1 ORDER BY i.item_code,loc.code`, [id]);
-    doc.stockCheckLines = doc.documentType === DocumentType.STOCK_CHECK ? await this.db.query(`SELECT c.id,c.location_id "locationId",l.code "locationCode",z.code "zoneCode",c.item_id "itemId",i.item_code "itemCode",i.name "itemName",i.model,i.unit,c.batch_id "batchId",b.batch_no "batchNo",c.counted_qty::text "countedQty",c.system_qty_snapshot::text "systemQtySnapshot",c.difference_qty::text "differenceQty",c.notes FROM stock_check_lines c JOIN warehouse_locations l ON l.id=c.location_id JOIN warehouse_zones z ON z.id=l.zone_id JOIN items i ON i.id=c.item_id LEFT JOIN inventory_batches b ON b.id=c.batch_id WHERE c.document_id=$1 ORDER BY l.code,i.item_code,b.batch_no NULLS FIRST`,[id]) : [];
-    doc.receiptAllocations = await this.db.query(`SELECT a.document_line_id "documentLineId",a.disposition,a.warehouse_id "warehouseId",w.warehouse_code "warehouseCode",a.location_id "locationId",l.code "locationCode",a.batch_id "batchId",a.quantity,a.defect_reason "defectReason" FROM stock_document_receipt_allocations a JOIN stock_document_lines dl ON dl.id=a.document_line_id JOIN warehouses w ON w.id=a.warehouse_id JOIN warehouse_locations l ON l.id=a.location_id WHERE dl.document_id=$1 ORDER BY a.id`, [id]);
+    doc.stockCheckLines = doc.documentType === DocumentType.STOCK_CHECK ? await this.db.query(`SELECT c.id,c.location_id "locationId",l.code "locationCode",l.code "locationDisplayName",NULLIF(z.actual_location,'未填写') "actualPosition",z.code "zoneCode",c.item_id "itemId",i.item_code "itemCode",i.name "itemName",i.model,i.unit,c.batch_id "batchId",b.batch_no "batchNo",c.counted_qty::text "countedQty",c.system_qty_snapshot::text "systemQtySnapshot",c.difference_qty::text "differenceQty",c.notes FROM stock_check_lines c JOIN warehouse_locations l ON l.id=c.location_id JOIN warehouse_zones z ON z.id=l.zone_id JOIN items i ON i.id=c.item_id LEFT JOIN inventory_batches b ON b.id=c.batch_id WHERE c.document_id=$1 ORDER BY l.code,i.item_code,b.batch_no NULLS FIRST`,[id]) : [];
+    doc.receiptAllocations = await this.db.query(`SELECT a.document_line_id "documentLineId",a.disposition,a.warehouse_id "warehouseId",w.warehouse_code "warehouseCode",a.location_id "locationId",l.code "locationCode",l.code "locationDisplayName",NULLIF(z.actual_location,'未填写') "actualPosition",a.batch_id "batchId",a.quantity,a.defect_reason "defectReason" FROM stock_document_receipt_allocations a JOIN stock_document_lines dl ON dl.id=a.document_line_id JOIN warehouses w ON w.id=a.warehouse_id JOIN warehouse_locations l ON l.id=a.location_id JOIN warehouse_zones z ON z.id=l.zone_id WHERE dl.document_id=$1 ORDER BY a.id`, [id]);
     doc.operationRecords = await this.db.query(`
       SELECT action,COALESCE(actor_name,actor_username,'—') "actorName",created_at "createdAt",
         CASE WHEN status_after='REJECTED' THEN '驳回' ELSE '成功' END result,
@@ -642,7 +950,7 @@ export class StockDocumentsService {
       FROM stock_documents d WHERE d.id=$1 AND d.voided_at IS NOT NULL
       ORDER BY "createdAt" DESC`, [id]);
     doc.transactions = await this.db.query(`
-      SELECT t.id "transactionNo",t.id,t.delta_qty "deltaQty",t.balance_before "balanceBefore",
+      SELECT t.id,t.flow_no "flowNo",(t.flow_no IS NULL) "isHistoricalFlow",t.delta_qty "deltaQty",t.balance_before "balanceBefore",
         t.balance_after "balanceAfter",i.item_code "itemCode",i.name "itemName",
         w.warehouse_code "warehouseCode",z.code "zoneCode",loc.code "locationCode",
         batch.batch_no "batchNo",COALESCE(t.operator_name,t.operator_username,u.name,u.username,'—') operator,

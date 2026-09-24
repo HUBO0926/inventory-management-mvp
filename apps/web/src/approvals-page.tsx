@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
-import { Button, Card, Col, Descriptions, Drawer, Form, Input, InputNumber, Modal, Row, Select, Space, Statistic, Table, Tag, Typography, message } from 'antd';
+import { Button, Card, Checkbox, Col, Descriptions, Drawer, Form, Input, InputNumber, Modal, Row, Select, Space, Statistic, Table, Tag, Typography, message } from 'antd';
 import { CheckOutlined, CloseOutlined, ReloadOutlined, SafetyCertificateOutlined } from '@ant-design/icons';
 import { api, idempotencyKey } from './api';
 import { formatBeijingTime, formatQuantity, statusText } from './domain';
 import { useIsMobile } from './responsive';
+import { LocationName, locationDisplayName } from './location-name';
 import type { User } from './App';
 
 const safe=(value:any,fallback:any='—')=>value===undefined||value===null||value===''?fallback:value;
@@ -28,6 +29,7 @@ export function ApprovalsPage({user}:{user:User}) {
   const [allocationOpen,setAllocationOpen]=useState(false);
   const [capacityByKey,setCapacityByKey]=useState<Record<string,any>>({});
   const [processing,setProcessing]=useState<any>();
+  const [onlyCheckDifferences,setOnlyCheckDifferences]=useState(false);
   const [rejectForm]=Form.useForm();
   const [allocationForm]=Form.useForm();
   const [processForm]=Form.useForm();
@@ -52,7 +54,7 @@ export function ApprovalsPage({user}:{user:User}) {
   };
   useEffect(()=>{void load();const timer=window.setInterval(load,60000);return()=>clearInterval(timer);},[mode,tab,JSON.stringify(filters)]);
 
-  const open=async(id:string)=>{try{setDetail(await api(`/approvals/${id}`));setDrawer(true);}catch(error:any){message.error(error.message);}};
+  const open=async(id:string)=>{try{setOnlyCheckDifferences(false);setDetail(await api(`/approvals/${id}`));setDrawer(true);}catch(error:any){message.error(error.message);}};
   const submitApprove=async(payload:any={})=>{
     if(!detail)return;
     try{
@@ -122,9 +124,25 @@ export function ApprovalsPage({user}:{user:User}) {
   ];
   const defectiveColumns:any[]=[
     {title:'物料',render:(_:any,row:any)=>`${row.itemCode} ${row.itemName}`},{title:'类型',dataIndex:'itemType',render:(value:string)=>value==='MATERIAL'?'原材料':'成品'},
-    {title:'不良品库位',render:(_:any,row:any)=>`${row.warehouseCode} / ${row.locationCode}`},{title:'来源单据',dataIndex:'sourceDocumentNo',render:safe},
+    {title:'不良品库位',render:(_:any,row:any)=><LocationName location={row}/>},{title:'来源单据',dataIndex:'sourceDocumentNo',render:safe},
     {title:'不良原因',dataIndex:'defectReason'},{title:'剩余数量',render:(_:any,row:any)=>`${formatQuantity(row.remainingQty)} ${row.unit}`},
     {title:'入库时间',dataIndex:'createdAt',render:formatBeijingTime},{title:'操作',render:(_:any,row:any)=>canProcess?<Button type="primary" size="small" onClick={()=>{setProcessing(row);processForm.resetFields();processForm.setFieldsValue({quantity:Number(row.remainingQty),action:row.itemType==='MATERIAL'?'RETURN':'RETURN_PRODUCTION',productionOrderId:row.productionOrderId});}}>处理</Button>:'-'},
+  ];
+  const stockCheckLines=(detail?.stockCheckLines||[]);
+  const visibleStockCheckLines=onlyCheckDifferences?stockCheckLines.filter((row:any)=>Number(row.differenceQty)!==0):stockCheckLines;
+  const stockCheckSummary=stockCheckLines.reduce((summary:any,row:any)=>{
+    const difference=Number(row.differenceQty||0);
+    summary.items.add(row.itemId||row.itemCode);
+    if(difference===0)summary.consistent.add(row.itemId||row.itemCode);
+    else {summary.different.add(row.itemId||row.itemCode);if(difference>0)summary.surplus.add(row.itemId||row.itemCode);else summary.loss.add(row.itemId||row.itemCode);}
+    return summary;
+  },{items:new Set<string>(),consistent:new Set<string>(),different:new Set<string>(),surplus:new Set<string>(),loss:new Set<string>()});
+  const stockCheckColumns:any[]=[
+    {title:'物料',render:(_:any,row:any)=><span>{row.itemCode} {row.itemName}{Number(row.differenceQty)!==0&&<Tag color="orange" style={{marginLeft:6}}>存在批次差异</Tag>}</span>},
+    {title:'型号',dataIndex:'model',render:safe}, {title:'单位',dataIndex:'unit',render:safe}, {title:'库位',render:(_:any,row:any)=><LocationName location={row}/>}, {title:'批次',dataIndex:'batchNo',render:safe},
+    {title:'账面数',dataIndex:'systemQtySnapshot',render:formatQuantity}, {title:'实盘数',dataIndex:'countedQty',render:formatQuantity},
+    {title:'差异',dataIndex:'differenceQty',render:(value:any)=><span className={Number(value)>0?'positive':Number(value)<0?'negative':''}>{Number(value)>0?'+' : ''}{formatQuantity(value)}</span>},
+    {title:'结果',render:(_:any,row:any)=>{const difference=Number(row.differenceQty);return <Tag color={difference===0?'green':difference>0?'blue':'orange'}>{difference===0?'一致':difference>0?'盘盈':'盘亏'}</Tag>; }},
   ];
   const recordColumns:any[]=[
     {title:'处理单号',dataIndex:'documentNo'},{title:'物料',render:(_:any,row:any)=>`${row.itemCode} ${row.itemName}`},{title:'处理方式',dataIndex:'action',render:(value:string)=>actionText[value]||value},
@@ -137,8 +155,8 @@ export function ApprovalsPage({user}:{user:User}) {
   const warehouseOptions=(type:string)=>Array.from(new Map(allocationOptions.filter((row:any)=>row.warehouseType===type).map((row:any)=>[row.warehouseId,{value:row.warehouseId,label:`${row.warehouseCode} ${row.warehouseName}`}])).values());
   const locationOptions=(warehouseId:string,itemId:string)=>{
     const inventory=capacityByKey[`${warehouseId}:${itemId}:INBOUND`];
-    if(inventory)return (inventory.locations||[]).map((row:any)=>({value:row.locationId,disabled:row.isFull,label:`${row.zoneCode} / ${row.locationCode}｜现存 ${formatQuantity(row.onHandQty)}｜${row.capacityQty===null?'不限量':`剩余 ${formatQuantity(row.availableCapacityQty)}`}`}));
-    return allocationOptions.filter((row:any)=>row.warehouseId===warehouseId).map((row:any)=>({value:row.locationId,label:`${row.zoneCode} / ${row.locationCode} ${row.locationName||''}`}));
+    if(inventory)return (inventory.locations||[]).map((row:any)=>({value:row.locationId,disabled:row.isFull,label:`${locationDisplayName(row)}｜现存 ${formatQuantity(row.onHandQty)}｜${row.capacityQty===null?'不限量':`剩余 ${formatQuantity(row.availableCapacityQty)}`}`}));
+    return allocationOptions.filter((row:any)=>row.warehouseId===warehouseId).map((row:any)=>({value:row.locationId,label:locationDisplayName(row)}));
   };
 
   return <div className="approvals-page">
@@ -152,7 +170,7 @@ export function ApprovalsPage({user}:{user:User}) {
     </Card>
 
     <Drawer title={`审核详情 - ${safe(detail?.documentNo,'未生成单号')}`} width={mobile?'100%':900} open={drawer} onClose={()=>setDrawer(false)} footer={<Space style={{display:'flex',justifyContent:'flex-end'}}><Button onClick={()=>setDrawer(false)}>关闭</Button>{detail?.status==='SUBMITTED'&&canReject&&<Button danger onClick={()=>setRejecting('single')}>驳回</Button>}{detail?.status==='SUBMITTED'&&canApprove&&<Button type="primary" icon={<CheckOutlined/>} onClick={approve}>审核通过</Button>}</Space>}>
-      {detail&&<><Descriptions column={mobile?1:2} bordered size="small" items={[{label:'业务类型',children:docName(detail.documentType)},{label:'状态',children:statusText[detail.status]||detail.status},{label:'送审意向仓库',children:`${safe(detail.warehouseCode)} ${safe(detail.warehouseName,'')}`},{label:'提交时间',children:formatBeijingTime(detail.submittedAt)},{label:'来源业务',children:safe(detail.sourceDocumentNo)},{label:'备注',children:safe(detail.notes)}]}/><Table size="small" rowKey="id" pagination={false} dataSource={detail.documentType==='STOCK_CHECK'?(detail.stockCheckLines||[]):(detail.lines||[])} columns={detail.documentType==='STOCK_CHECK'?[{title:'物料',render:(_:any,row:any)=>`${row.itemCode} ${row.itemName}`},{title:'库位',dataIndex:'locationCode'},{title:'批次',dataIndex:'batchNo',render:safe},{title:'账面数',dataIndex:'systemQtySnapshot',render:formatQuantity},{title:'实盘数',dataIndex:'countedQty',render:formatQuantity},{title:'差异',dataIndex:'differenceQty',render:formatQuantity}]:[{title:'物料',render:(_:any,row:any)=>`${row.itemCode} ${row.itemName}`},{title:'原库位',dataIndex:'locationCode'},{title:'批次',dataIndex:'batchNo',render:safe},{title:'数量',render:(_:any,row:any)=>`${formatQuantity(row.quantity)} ${row.unit}`}]} style={{marginTop:16}}/>{detail.receiptAllocations?.length>0&&<Table size="small" rowKey={(row:any)=>`${row.documentLineId}-${row.disposition}-${row.locationId}`} pagination={false} dataSource={detail.receiptAllocations} columns={[{title:'分配',dataIndex:'disposition',render:(value:string)=>value==='NORMAL'?'正常品':'不良品'},{title:'仓库',dataIndex:'warehouseCode'},{title:'库位',dataIndex:'locationCode'},{title:'数量',dataIndex:'quantity',render:formatQuantity},{title:'不良原因',dataIndex:'defectReason',render:safe}]} style={{marginTop:16}}/>}</>}
+      {detail&&<><Descriptions column={mobile?1:2} bordered size="small" items={[{label:'业务类型',children:docName(detail.documentType)},{label:'状态',children:statusText[detail.status]||detail.status},{label:'送审意向仓库',children:`${safe(detail.warehouseCode)} ${safe(detail.warehouseName,'')}`},{label:'提交时间',children:formatBeijingTime(detail.submittedAt)},{label:'来源业务',children:safe(detail.sourceDocumentNo)},{label:'备注',children:safe(detail.notes)}]}/>{detail.documentType==='STOCK_CHECK'&&<div className="warehouse-stock-check-summary"><Tag color="blue">物料种类 {stockCheckSummary.items.size}</Tag><Tag color="green">一致 {stockCheckSummary.consistent.size}</Tag><Tag color={stockCheckSummary.different.size?'orange':'default'}>存在差异 {stockCheckSummary.different.size}</Tag><Tag color="blue">盘盈 {stockCheckSummary.surplus.size}</Tag><Tag color="orange">盘亏 {stockCheckSummary.loss.size}</Tag><Checkbox checked={onlyCheckDifferences} onChange={event=>setOnlyCheckDifferences(event.target.checked)}>仅看差异</Checkbox></div>}<Table size="small" rowKey="id" pagination={false} dataSource={detail.documentType==='STOCK_CHECK'?visibleStockCheckLines:(detail.lines||[])} columns={detail.documentType==='STOCK_CHECK'?stockCheckColumns:[{title:'物料',render:(_:any,row:any)=>`${row.itemCode} ${row.itemName}`},{title:'原库位',render:(_:any,row:any)=><LocationName location={row}/>},{title:'批次',dataIndex:'batchNo',render:safe},{title:'数量',render:(_:any,row:any)=>`${formatQuantity(row.quantity)} ${row.unit}`}]} style={{marginTop:16}}/>{detail.receiptAllocations?.length>0&&<Table size="small" rowKey={(row:any)=>`${row.documentLineId}-${row.disposition}-${row.locationId}`} pagination={false} dataSource={detail.receiptAllocations} columns={[{title:'分配',dataIndex:'disposition',render:(value:string)=>value==='NORMAL'?'正常品':'不良品'},{title:'仓库',dataIndex:'warehouseCode'},{title:'库位',render:(_:any,row:any)=><LocationName location={row}/>},{title:'数量',dataIndex:'quantity',render:formatQuantity},{title:'不良原因',dataIndex:'defectReason',render:safe}]} style={{marginTop:16}}/>}</>}
     </Drawer>
 
     <Modal width={850} title="入库审核分配" open={allocationOpen} onCancel={()=>setAllocationOpen(false)} onOk={()=>allocationForm.submit()} okText="审核通过并过账">

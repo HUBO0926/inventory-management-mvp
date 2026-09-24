@@ -80,7 +80,7 @@ export class ApprovalsService {
     const detail=await this.stock.get(id);
     if (['MATERIAL_INBOUND','FINISHED_INBOUND','PRODUCTION_RETURN','PRODUCTION_COMPLETION'].includes(detail.documentType)) {
       detail.allocationOptions=await this.db.query(`SELECT w.id "warehouseId",w.warehouse_code "warehouseCode",w.name "warehouseName",w.warehouse_type "warehouseType",
-        z.id "zoneId",z.code "zoneCode",z.name "zoneName",l.id "locationId",l.code "locationCode",l.name "locationName"
+        z.id "zoneId",z.code "zoneCode",z.name "zoneName",NULLIF(z.actual_location,'未填写') "actualPosition",l.id "locationId",l.code "locationCode",l.code "locationDisplayName",l.name "locationName"
         FROM warehouses w JOIN warehouse_zones z ON z.warehouse_id=w.id JOIN warehouse_locations l ON l.zone_id=z.id
         WHERE w.status='ACTIVE' AND w.deleted_at IS NULL AND z.status='ACTIVE' AND z.deleted_at IS NULL
           AND l.status='ACTIVE' AND l.is_archived=false
@@ -147,11 +147,11 @@ export class ApprovalsService {
     const [{count}]=await this.db.query(`SELECT count(*)::int count FROM defective_inventory_lots lot JOIN items i ON i.id=lot.item_id LEFT JOIN stock_documents d ON d.id=lot.source_document_id ${clause}`,params);
     params.push(pageSize,(page-1)*pageSize);
     const items=await this.db.query(`SELECT lot.id,lot.item_id "itemId",i.item_code "itemCode",i.name "itemName",i.item_type "itemType",i.unit,
-      lot.warehouse_id "warehouseId",w.warehouse_code "warehouseCode",lot.location_id "locationId",loc.code "locationCode",
+      lot.warehouse_id "warehouseId",w.warehouse_code "warehouseCode",lot.location_id "locationId",loc.code "locationCode",loc.code "locationDisplayName",NULLIF(z.actual_location,'未填写') "actualPosition",
       lot.batch_id "batchId",b.batch_no "batchNo",lot.production_order_id "productionOrderId",po.order_no "productionOrderNo",
       d.document_no "sourceDocumentNo",lot.defect_reason "defectReason",lot.received_qty "receivedQty",lot.remaining_qty "remainingQty",lot.created_at "createdAt"
       FROM defective_inventory_lots lot JOIN items i ON i.id=lot.item_id JOIN warehouses w ON w.id=lot.warehouse_id
-      JOIN warehouse_locations loc ON loc.id=lot.location_id LEFT JOIN inventory_batches b ON b.id=lot.batch_id
+      JOIN warehouse_locations loc ON loc.id=lot.location_id JOIN warehouse_zones z ON z.id=loc.zone_id LEFT JOIN inventory_batches b ON b.id=lot.batch_id
       LEFT JOIN stock_documents d ON d.id=lot.source_document_id LEFT JOIN production_orders po ON po.id=lot.production_order_id
       ${clause} ORDER BY lot.created_at DESC LIMIT $${params.length-1} OFFSET $${params.length}`,params);
     const productionOrders=await this.db.query(`SELECT o.id,o.order_no "orderNo",o.finished_good_id "itemId",o.status,
@@ -163,7 +163,7 @@ export class ApprovalsService {
       WHERE o.status IN ('RELEASED','IN_PROGRESS') AND o.planned_qty-o.completed_qty-COALESCE(pending.quantity,0)>0
       ORDER BY o.created_at DESC`);
     const allocationOptions=await this.db.query(`SELECT w.id "warehouseId",w.warehouse_code "warehouseCode",w.name "warehouseName",w.warehouse_type "warehouseType",
-      z.id "zoneId",z.code "zoneCode",l.id "locationId",l.code "locationCode",l.name "locationName"
+      z.id "zoneId",z.code "zoneCode",NULLIF(z.actual_location,'未填写') "actualPosition",l.id "locationId",l.code "locationCode",l.code "locationDisplayName",l.name "locationName"
       FROM warehouses w JOIN warehouse_zones z ON z.warehouse_id=w.id JOIN warehouse_locations l ON l.zone_id=z.id
       WHERE w.status='ACTIVE' AND w.deleted_at IS NULL AND z.status='ACTIVE' AND z.deleted_at IS NULL AND l.status='ACTIVE' AND l.is_archived=false
       ORDER BY w.warehouse_code,z.code,l.code`);
@@ -178,10 +178,10 @@ export class ApprovalsService {
     params.push(pageSize,(page-1)*pageSize);
     const items=await this.db.query(`SELECT r.id,r.action,r.quantity,r.reason,r.created_at "createdAt",r.processed_by_name "processedByName",
       i.item_code "itemCode",i.name "itemName",i.item_type "itemType",i.unit,d.document_no "documentNo",
-      tw.warehouse_code "targetWarehouseCode",tl.code "targetLocationCode",po.order_no "productionOrderNo"
+      tw.warehouse_code "targetWarehouseCode",tl.code "targetLocationCode",tl.code "targetLocationDisplayName",NULLIF(tz.actual_location,'未填写') "targetActualPosition",po.order_no "productionOrderNo"
       FROM defective_disposition_records r JOIN defective_inventory_lots lot ON lot.id=r.lot_id JOIN items i ON i.id=lot.item_id
       JOIN stock_documents d ON d.id=r.document_id LEFT JOIN warehouses tw ON tw.id=r.target_warehouse_id
-      LEFT JOIN warehouse_locations tl ON tl.id=r.target_location_id LEFT JOIN production_orders po ON po.id=r.production_order_id
+      LEFT JOIN warehouse_locations tl ON tl.id=r.target_location_id LEFT JOIN warehouse_zones tz ON tz.id=tl.zone_id LEFT JOIN production_orders po ON po.id=r.production_order_id
       ${clause} ORDER BY r.created_at DESC LIMIT $${params.length-1} OFFSET $${params.length}`,params);
     return {items,total:count,page,pageSize};
   }

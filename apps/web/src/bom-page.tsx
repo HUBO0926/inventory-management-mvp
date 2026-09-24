@@ -178,6 +178,7 @@ export function BomsPage({ user }: { user: User }) {
         lines: values.lines.map((line: any) => ({
           materialId: line.materialId,
           qtyPer: String(line.qtyPer),
+          remark: line.remark?.trim() || undefined,
         })),
       };
       await api(editingId ? `/boms/${editingId}` : '/boms', {
@@ -194,18 +195,18 @@ export function BomsPage({ user }: { user: User }) {
     }
   };
   const copy = (record: any) => {
-    let version = `${record.version}-COPY`;
+    let model = `${record.version}-COPY`;
     Modal.confirm({
       title: '复制 BOM',
-      content: <Input defaultValue={version} onChange={event => { version = event.target.value; }} placeholder="新版本号" />,
+      content: <Input defaultValue={model} onChange={event => { model = event.target.value; }} placeholder="新型号" />,
       okText: '复制',
       onOk: async () => {
-        if (!version.trim()) throw new Error('请输入新版本号');
+        if (!model.trim()) throw new Error('请输入新型号');
         await api(`/boms/${record.id}/copy`, {
           method: 'POST',
-          body: JSON.stringify({ version: version.trim(), status: 'INACTIVE' }),
+          body: JSON.stringify({ version: model.trim(), status: 'INACTIVE' }),
         });
-        message.success('BOM 已复制为停用版本');
+        message.success('BOM 已复制为停用型号');
         await load();
       },
     });
@@ -239,7 +240,7 @@ export function BomsPage({ user }: { user: User }) {
         <span>{record.finishedGoodCode} {record.finishedGoodName}<small className="table-subtext">{itemTypeText[record.outputItemType]}</small></span>
       ),
     },
-    { title: '版本', dataIndex: 'version' },
+    { title: '型号', dataIndex: 'version' },
     { title: '明细数', dataIndex: 'lineCount', align: 'right' },
     { title: '状态', dataIndex: 'status', render: (value: string) => <StatusTag value={value} /> },
     { title: '备注', dataIndex: 'notes', render: (value: string) => value || '-' },
@@ -283,22 +284,23 @@ export function BomsPage({ user }: { user: User }) {
             <Select {...pagedSelectProps(outputItems)} />
           </Form.Item>
           <Row gutter={12}>
-            <Col xs={24} sm={12}><Form.Item label="版本" name="version" rules={[{ required: true }]}><Input maxLength={30} /></Form.Item></Col>
+            <Col xs={24} sm={12}><Form.Item label="型号" name="version" rules={[{ required: true, message: '请输入型号' }]}><Input maxLength={30} /></Form.Item></Col>
             <Col xs={24} sm={12}><Form.Item label="状态" name="status" rules={[{ required: true }]}><Select options={[{ value: 'ACTIVE', label: '启用' }, { value: 'INACTIVE', label: '停用' }]} /></Form.Item></Col>
           </Row>
           <Form.List name="lines">
             {(fields, { add, remove: removeLine }) => <>
               {fields.map(field => (
                 <Row gutter={8} key={field.key} align="middle">
-                  <Col xs={24} sm={16}><Form.Item {...field} label="组成物料" name={[field.name, 'materialId']} rules={[{ required: true }]}>
+                  <Col xs={24} sm={12}><Form.Item {...field} label="组成物料" name={[field.name, 'materialId']} rules={[{ required: true }]}>
                     <Select
                       {...pagedSelectProps(componentItems)}
                       options={componentOptions}
                     />
                   </Form.Item></Col>
-                  <Col xs={20} sm={6}><Form.Item {...field} label="单件用量" name={[field.name, 'qtyPer']} rules={[{ required: true }]}>
+                  <Col xs={12} sm={4}><Form.Item {...field} label="单件用量" name={[field.name, 'qtyPer']} rules={[{ required: true }]}>
                     <InputNumber min={1} precision={0} stringMode style={{ width: '100%' }} />
                   </Form.Item></Col>
+                  <Col xs={20} sm={6}><Form.Item {...field} label="备注" name={[field.name, 'remark']}><Input maxLength={200} placeholder="可选" /></Form.Item></Col>
                   <Col xs={4} sm={2}><Button danger type="text" icon={<DeleteOutlined />} aria-label="删除 BOM 明细" onClick={() => removeLine(field.name)} /></Col>
                 </Row>
               ))}
@@ -313,7 +315,7 @@ export function BomsPage({ user }: { user: User }) {
           <Descriptions bordered column={1} items={[
             { label: '产出成品', children: `${detail.finishedGoodCode} ${detail.finishedGoodName}` },
             { label: '物料类型', children: itemTypeText[detail.outputItemType] },
-            { label: '版本', children: detail.version },
+            { label: '型号', children: detail.version },
             { label: '状态', children: <StatusTag value={detail.status} /> },
             { label: '备注', children: detail.notes || '-' },
           ]} />
@@ -326,6 +328,7 @@ export function BomsPage({ user }: { user: User }) {
               { title: '类型', dataIndex: 'itemType', render: (value: string) => itemTypeText[value] },
               { title: '单件用量', dataIndex: 'qtyPer', align: 'right', render: formatQuantity },
               { title: '单位', dataIndex: 'unit' },
+              { title: '备注', dataIndex: 'remark', render: (value: string) => value || '-' },
             ]}
           />
         </>}
