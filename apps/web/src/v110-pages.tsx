@@ -250,10 +250,13 @@ export function StockDocumentsV110Page({ type }: { type: StockType }) {
   const savingRef = useRef(false);
   const sourceScope = useMemo(() => ({ warehouseId: new URLSearchParams(route.search).get('warehouseId') || undefined, zoneId: new URLSearchParams(route.search).get('zoneId') || undefined, locationId: new URLSearchParams(route.search).get('locationId') || undefined }), [route.search]);
   const load = () => Promise.all([
-    api(`/stock-documents?documentType=${type}&pageSize=100`), api(`/items?pageSize=100&status=ACTIVE${meta.itemType ? `&itemType=${meta.itemType}` : ''}`),
+    api(`/stock-documents?documentType=${type}&pageSize=100`), api(`/items?page=1&pageSize=100&status=ACTIVE${meta.itemType ? `&itemType=${meta.itemType}` : ''}`),
     api('/warehouses'), api('/warehouse-locations?pageSize=100'), api('/batches?pageSize=100'),
-  ]).then(([docs, itemRows, warehouseRows, locationRows, batchRows]) => {
-    setRows(docs.items); setItems(itemRows.items); setWarehouses(warehouseRows);
+  ]).then(async ([docs, firstItems, warehouseRows, locationRows, batchRows]) => {
+    // 物料下拉必须取全量：单页上限 100，物料超过 100 条时编码靠后的会从下拉中消失
+    const pages = Math.ceil(Number(firstItems.total || 0) / 100);
+    const restItemPages = pages > 1 ? await Promise.all(Array.from({ length: pages - 1 }, (_, index) => api(`/items?page=${index + 2}&pageSize=100&status=ACTIVE${meta.itemType ? `&itemType=${meta.itemType}` : ''}`))) : [];
+    setRows(docs.items); setItems([...(firstItems.items || []), ...restItemPages.flatMap((page: any) => page.items || [])]); setWarehouses(warehouseRows);
     setLocations(locationRows.items.map(normalize)); setBatches(batchRows.items.map(normalize));
   }).catch(fail);
   useEffect(() => { void load(); }, [type]);
