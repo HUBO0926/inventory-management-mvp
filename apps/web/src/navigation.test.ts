@@ -5,6 +5,7 @@ describe('移动导航权限', () => {
   it('仓库角色包含完整库存作业入口', () => {
     expect(visibleRouteKeysForRole('WAREHOUSE')).toEqual([
       '/',
+      '/inbound',
       '/virtual-warehouse',
       '/approvals',
       '/notifications',

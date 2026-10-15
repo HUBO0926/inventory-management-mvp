@@ -18,6 +18,8 @@ type Props = {
   selectedLocationId?: string;
   /** Finished inbound has its own item-aware capacity endpoint; all other target modes use the shared tree. */
   inboundEndpoint?: 'finished-inbound' | 'shared';
+  /** Stacking layer; raise it when the selector is launched from inside another Drawer. */
+  zIndex?: number;
   onClose: () => void;
   onConfirm: (location: any, batch?: any) => void;
 };
@@ -40,7 +42,7 @@ export function buildLocationSelectorParams(mode: LocationSelectorMode, itemId: 
  * One selector for every stock operation. The API remains the permission boundary:
  * this component only renders locations the server has already authorized.
  */
-export function WarehouseLocationSelector({ open, mode, itemId, context = {}, queryScope, selectedLocationId, inboundEndpoint = 'shared', onClose, onConfirm }: Props) {
+export function WarehouseLocationSelector({ open, mode, itemId, context = {}, queryScope, selectedLocationId, inboundEndpoint = 'shared', zIndex, onClose, onConfirm }: Props) {
   const [data, setData] = useState<any>();
   const [keyword, setKeyword] = useState('');
   const [filter, setFilter] = useState('ALL');
@@ -105,7 +107,7 @@ export function WarehouseLocationSelector({ open, mode, itemId, context = {}, qu
 
   const title = mode === 'inbound' ? '选择入库位置' : mode === 'outbound' ? '选择出库位置' : mode === 'transfer-source' ? '选择移出位置' : '选择移库目标位置（同类型仓库）';
   const pendingName = pending ? locationDisplayName(pending.location) : '尚未选择库位';
-  return <Drawer width={720} title={title} open={open} onClose={onClose} extra={!sourceMode && <Space><Input allowClear value={keyword} onChange={event => setKeyword(event.target.value)} placeholder="搜索仓库 / 库区 / 库位 / 物料" /><Select value={filter} style={{ width: 140 }} onChange={setFilter} options={filterOptions} /></Space>} footer={<div className="finished-inbound-picker-footer"><span>{pending ? <Space direction="vertical" size={0}><LocationName location={pending.location} /><Typography.Text type="secondary">{locationContext(pending.location)}</Typography.Text></Space> : pendingName}</span><Space><Button onClick={onClose}>取消</Button><Button type="primary" disabled={!pending} onClick={() => pending && onConfirm(pending.location, pending.batch)}>确认选择</Button></Space></div>}>
+  return <Drawer width={720} zIndex={zIndex} title={title} open={open} onClose={onClose} extra={!sourceMode && <Space><Input allowClear value={keyword} onChange={event => setKeyword(event.target.value)} placeholder="搜索仓库 / 库区 / 库位 / 物料" /><Select value={filter} style={{ width: 140 }} onChange={setFilter} options={filterOptions} /></Space>} footer={<div className="finished-inbound-picker-footer"><span>{pending ? <Space direction="vertical" size={0}><LocationName location={pending.location} /><Typography.Text type="secondary">{locationContext(pending.location)}</Typography.Text></Space> : pendingName}</span><Space><Button onClick={onClose}>取消</Button><Button type="primary" disabled={!pending} onClick={() => pending && onConfirm(pending.location, pending.batch)}>确认选择</Button></Space></div>}>
     {!itemId ? <Alert type="info" showIcon message="请先选择物料" /> : !data ? <Spin /> : data.error ? <Alert type="error" showIcon message="库存位置查询失败，请重试。" description={data.error} /> : <Tree showLine treeData={treeData} expandedKeys={expandedKeys} onExpand={keys => setExpandedKeys(keys.map(String))} selectedKeys={pending ? [pending.location.locationId] : selectedLocationId ? [selectedLocationId] : []} onSelect={(_keys, info: any) => { if (!info.node?.isLeaf || info.node.disabled) return; setPending({ location: info.node.location, batch: info.node.batch }); }} />}
   </Drawer>;
 }

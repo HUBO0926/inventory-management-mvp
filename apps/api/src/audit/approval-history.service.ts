@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { QueryRunner } from 'typeorm';
 
-export interface ApprovalContext { requestId?: string; ip?: string; idempotencyKey?: string; reasonCode?: string; reason?: string; source?: string; }
+export interface ApprovalContext { requestId?: string; ip?: string; idempotencyKey?: string; reasonCode?: string; reason?: string; source?: string; lineReview?: boolean; approvedLineIds?: string[]; rejectedLineIds?: string[]; pendingCount?: number; }
 
 @Injectable()
 export class ApprovalHistoryService {
@@ -14,7 +14,7 @@ export class ApprovalHistoryService {
       documentId, doc.document_no, doc.document_type, action, before, after, actorId || null,
       actor?.username || null, actor?.name || null, context.reasonCode || null, context.reason || null,
       context.idempotencyKey || null, context.requestId || null, context.ip || null,
-      JSON.stringify({ warehouseId: doc.warehouse_id, productionOrderId: doc.production_order_id, notes: doc.notes }), context.source || 'SYSTEM',
+      JSON.stringify({ warehouseId: doc.warehouse_id, productionOrderId: doc.production_order_id, notes: doc.notes, lineReview: context.lineReview, approvedLineIds: context.approvedLineIds, rejectedLineIds: context.rejectedLineIds, pendingCount: context.pendingCount }), context.source || 'SYSTEM',
     ]);
   }
 }

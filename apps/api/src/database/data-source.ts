@@ -28,6 +28,7 @@ import { FunctionalWarehouseTestRuns1950000000000 } from './migrations/195000000
 import { FinishedInboundLocationSelectionIndexes1960000000000 } from './migrations/1960000000000-FinishedInboundLocationSelectionIndexes';
 import { FinishedInboundPerformanceIndexes1970000000000 } from './migrations/1970000000000-FinishedInboundPerformanceIndexes';
 import { StockTransactionFlowNumbers1980000000000 } from './migrations/1980000000000-StockTransactionFlowNumbers';
+import { MaterialInboundLineReview1990000000000 } from './migrations/1990000000000-MaterialInboundLineReview';
 
 export const createDataSource = () => {
   const connection = process.env.DATABASE_URL
@@ -72,6 +73,7 @@ export const createDataSource = () => {
     FinishedInboundLocationSelectionIndexes1960000000000,
     FinishedInboundPerformanceIndexes1970000000000,
     StockTransactionFlowNumbers1980000000000,
+    MaterialInboundLineReview1990000000000,
     ],
     extra: { options: '-c timezone=Asia/Shanghai' },
     logging: process.env.DB_LOGGING === 'true',

@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react';
-import { Button, Card, Checkbox, Col, Descriptions, Drawer, Form, Input, InputNumber, Modal, Row, Select, Space, Statistic, Table, Tag, Typography, message } from 'antd';
+import { Button, Card, Checkbox, Col, Descriptions, Drawer, Form, Input, InputNumber, Modal, Row, Select, Space, Statistic, Table, Tag, Tooltip, Typography, message } from 'antd';
 import { CheckOutlined, CloseOutlined, ReloadOutlined, SafetyCertificateOutlined } from '@ant-design/icons';
 import { api, idempotencyKey } from './api';
 import { formatBeijingTime, formatQuantity, statusText } from './domain';
 import { useIsMobile } from './responsive';
 import { LocationName, locationDisplayName } from './location-name';
+import { WarehouseLocationSelector } from './warehouse-location-selector';
 import type { User } from './App';
 
 const safe=(value:any,fallback:any='—')=>value===undefined||value===null||value===''?fallback:value;
@@ -30,6 +31,9 @@ export function ApprovalsPage({user}:{user:User}) {
   const [capacityByKey,setCapacityByKey]=useState<Record<string,any>>({});
   const [processing,setProcessing]=useState<any>();
   const [onlyCheckDifferences,setOnlyCheckDifferences]=useState(false);
+  const [review,setReview]=useState<Record<string,{checked:boolean;quantity:number|null;locationId?:string;locationDisplay?:any;reason:string}>>({});
+  const [reviewPicker,setReviewPicker]=useState<{lineId:string;itemId:string}>();
+  const [reviewSaving,setReviewSaving]=useState(false);
   const [rejectForm]=Form.useForm();
   const [allocationForm]=Form.useForm();
   const [processForm]=Form.useForm();
@@ -54,7 +58,10 @@ export function ApprovalsPage({user}:{user:User}) {
   };
   useEffect(()=>{void load();const timer=window.setInterval(load,60000);return()=>clearInterval(timer);},[mode,tab,JSON.stringify(filters)]);
 
-  const open=async(id:string)=>{try{setOnlyCheckDifferences(false);setDetail(await api(`/approvals/${id}`));setDrawer(true);}catch(error:any){message.error(error.message);}};
+  const open=async(id:string)=>{try{setOnlyCheckDifferences(false);const d=await api(`/approvals/${id}`);setDetail(d);
+    const init:Record<string,{checked:boolean;quantity:number|null;locationId?:string;locationDisplay?:any;reason:string}>={};
+    for(const line of d.lines||[]){if((line.reviewStatus||'PENDING')==='PENDING')init[line.id]={checked:true,quantity:Number(line.quantity),locationId:line.locationId,locationDisplay:line,reason:''};}
+    setReview(init);setDrawer(true);}catch(error:any){message.error(error.message);}};
   const submitApprove=async(payload:any={})=>{
     if(!detail)return;
     try{
@@ -107,13 +114,60 @@ export function ApprovalsPage({user}:{user:User}) {
       message.success('已驳回');setRejecting(undefined);setDrawer(false);setSelected([]);rejectForm.resetFields();void load();
     }catch(error:any){message.error(error.message);}
   };
+  const pendingReviewLines=()=>(detail?.documentType==='MATERIAL_INBOUND'?(detail.lines||[]).filter((line:any)=>(line.reviewStatus||'PENDING')==='PENDING'):[]);
+  const buildReviewDecisions=(lineIds:string[])=>{
+    const decisions:any[]=[];
+    for(const line of pendingReviewLines()){
+      const state=review[line.id];
+      if(!lineIds.includes(line.id))continue;
+      if(state?.checked){
+        const quantity=Number(state.quantity);
+        if(!Number.isInteger(quantity)||quantity<1)throw new Error(`${line.itemCode} 入库数量必须是正整数`);
+        if(!state.locationId)throw new Error(`${line.itemCode} 请选择入库库位`);
+        decisions.push({lineId:line.id,decision:'APPROVE',quantity:String(quantity),locationId:state.locationId});
+      }else{
+        const reason=String(state?.reason||'').trim();
+        if(!reason)throw new Error(`${line.itemCode} 被驳回时必须填写不通过原因`);
+        decisions.push({lineId:line.id,decision:'REJECT',reason});
+      }
+    }
+    return decisions;
+  };
+  const submitReview=async(decisions:any[])=>{
+    if(!detail||reviewSaving)return;
+    setReviewSaving(true);
+    try{
+      const result:any=await api(`/approvals/${detail.id}/approve-lines`,{method:'POST',headers:{'Idempotency-Key':idempotencyKey()},body:JSON.stringify({decisions})});
+      const approved=decisions.filter((item:any)=>item.decision==='APPROVE').length;
+      if(result.status==='POSTED'){message.success('全部明细已审核通过并入库存');setDrawer(false);void load();}
+      else if(result.status==='REJECTED'){message.success(`${approved} 条明细已入库，其余明细已退回提交人`);setDrawer(false);void load();}
+      else{message.success(`${approved} 条明细已审核入库，其余明细继续待审`);await open(detail.id);}
+      window.dispatchEvent(new Event('inventory:refresh'));
+    }catch(error:any){message.error(error.message||'审核失败');}
+    finally{setReviewSaving(false);}
+  };
+  const approveChecked=()=>{
+    const pending=pendingReviewLines();
+    const checkedIds=pending.filter((line:any)=>review[line.id]?.checked).map((line:any)=>line.id);
+    const rejectedCount=pending.length-checkedIds.length;
+    let decisions:any[];
+    try{decisions=buildReviewDecisions(pending.map((line:any)=>line.id));}catch(error:any){message.error(error.message);return;}
+    if(!checkedIds.length){message.warning('请至少勾选一条通过的明细');return;}
+    if(rejectedCount>0)Modal.confirm({title:`通过 ${checkedIds.length} 条，驳回 ${rejectedCount} 条？`,content:'勾选明细将立即入库；未勾选明细随原单退回提交人，提交人按每条意见修改后重新提交。',okText:'确认审核',okButtonProps:{danger:true},onOk:()=>submitReview(decisions)});
+    else Modal.confirm({title:`确认 ${checkedIds.length} 条明细全部审核通过并立即过账？`,content:'库存余额将在同一事务内更新。',okText:'审核通过',onOk:()=>submitReview(decisions)});
+  };
+  const approveOne=(line:any)=>{
+    let decision:any;
+    try{[decision]=buildReviewDecisions([line.id]);}catch(error:any){message.error(error.message);return;}
+    Modal.confirm({title:`仅通过「${line.itemCode} ${line.itemName}」？`,content:'该明细立即入库，其余明细保持待审核状态。',okText:'通过本行',onOk:()=>submitReview([decision])});
+  };
+
   const process=async(values:any)=>{
     try{
       await api(`/approvals/defective-items/${processing.id}/process`,{method:'POST',headers:{'Idempotency-Key':idempotencyKey()},body:JSON.stringify({...values,quantity:String(values.quantity)})});
       message.success('不良品处理完成');setProcessing(undefined);processForm.resetFields();void load();window.dispatchEvent(new Event('inventory:refresh'));
     }catch(error:any){message.error(error.message);}
   };
-
   const approvalColumns:any[]=[
     {title:'单据编号',dataIndex:'documentNo',render:(value:any,row:any)=><Button type="link" onClick={()=>open(row.id)}>{safe(value,'未生成单号')}</Button>},
     {title:'业务类型',dataIndex:'documentType',render:docName},{title:'仓库',render:(_:any,row:any)=>`${safe(row.warehouseCode)} ${safe(row.warehouseName,'')}`},
@@ -159,6 +213,32 @@ export function ApprovalsPage({user}:{user:User}) {
     return allocationOptions.filter((row:any)=>row.warehouseId===warehouseId).map((row:any)=>({value:row.locationId,label:locationDisplayName(row)}));
   };
 
+  const materialReviewPending=pendingReviewLines();
+  const checkedCount=materialReviewPending.filter((line:any)=>review[line.id]?.checked).length;
+  const changeLogTitle=(changes:any[])=>changes.map((c:any,i:number)=>`${i+1}. ${c.by||'审核人'} 将${c.field==='quantity'?'数量':c.field==='locationId'?'库位':'批次'} ${c.before ?? '空'} → ${c.after ?? '空'}`).join('\n');
+  const materialReviewColumns:any[]=[
+    {title:'物料',width:210,render:(_:any,row:any)=> <Space direction="vertical" size={0} style={{maxWidth:'100%'}}>
+      <Tooltip title={`${row.itemCode} ${row.itemName}`}><Typography.Text strong ellipsis style={{maxWidth:190}}>{row.itemCode} {row.itemName}</Typography.Text></Tooltip>
+      {(row.reviewStatus||'PENDING')==='POSTED'&&<Tag color="green" style={{width:'fit-content',marginTop:2}}>已入库</Tag>}
+      {row.reviewStatus==='REJECTED'&&<Tooltip title={row.reviewRemark}><Tag color="red" style={{width:'fit-content',marginTop:2}}>已驳回</Tag></Tooltip>}
+    </Space>},
+    {title:'入库库位',width:250,render:(_:any,row:any)=>(row.reviewStatus||'PENDING')==='PENDING'
+      ? <Space size={4} wrap align="start"><span style={{maxWidth:170}}><LocationName location={review[row.id]?.locationDisplay||row}/></span><Button size="small" type="link" style={{padding:0}} onClick={()=>setReviewPicker({lineId:row.id,itemId:row.itemId})}>更换</Button></Space>
+      : <LocationName location={row}/>},
+    {title:'批次',dataIndex:'batchNo',width:100,ellipsis:true,render:safe},
+    {title:'数量',width:120,render:(_:any,row:any)=>(row.reviewStatus||'PENDING')==='PENDING'
+      ? <Space size={4}><InputNumber size="small" precision={0} min={1} value={review[row.id]?.quantity ?? null} style={{width:78}} onChange={value=>setReview(c=>({...c,[row.id]:{...c[row.id],quantity:value}}))}/><Typography.Text type="secondary" style={{fontSize:12}}>{row.unit||''}</Typography.Text></Space>
+      : `${formatQuantity(row.quantity)} ${row.unit||''}`},
+    {title:'审核意见 / 记录',width:280,render:(_:any,row:any)=>{
+      const status=row.reviewStatus||'PENDING';
+      if(status==='PENDING')return <Input size="small" placeholder={review[row.id]?.checked?'通过时可选填备注':'不通过原因（必填）'} value={review[row.id]?.reason||''} onChange={e=>setReview(c=>({...c,[row.id]:{...c[row.id],reason:e.target.value}}))}/>;
+      if(status==='POSTED')return Array.isArray(row.reviewChanges)&&row.reviewChanges.length?<Tooltip title={changeLogTitle(row.reviewChanges)}><Typography.Link>审核修改 {row.reviewChanges.length} 处（悬停查看）</Typography.Link></Tooltip>:'—';
+      return <Typography.Text type="danger">{row.reviewRemark}</Typography.Text>;
+    }},
+    {title:'操作',width:88,fixed:'right',render:(_:any,row:any)=>detail.status==='SUBMITTED'&&canApprove&&(row.reviewStatus||'PENDING')==='PENDING'
+      ? <Button type="link" size="small" style={{padding:0}} onClick={()=>approveOne(row)}>通过本行</Button>:null},
+  ];
+
   return <div className="approvals-page">
     <div className="page-heading"><div><Typography.Title level={2}>审核中心</Typography.Title><Typography.Text type="secondary">所有库存审核与不良品处置统一在此处理。</Typography.Text></div><Button icon={<ReloadOutlined/>} onClick={load}>刷新</Button></div>
     <Space wrap style={{marginBottom:16}}><Button type={mode==='approval'?'primary':'default'} onClick={()=>{setMode('approval');setFilters({});}}>单据审核</Button>{canViewDefective&&<><Button type={mode==='defective'?'primary':'default'} onClick={()=>{setMode('defective');setFilters({});}}>待处理不良品</Button><Button type={mode==='records'?'primary':'default'} onClick={()=>{setMode('records');setFilters({});}}>不良品处理记录</Button></>}</Space>
@@ -169,8 +249,8 @@ export function ApprovalsPage({user}:{user:User}) {
       <Table rowKey="id" loading={loading} columns={mode==='approval'?approvalColumns:mode==='defective'?defectiveColumns:recordColumns} dataSource={data.items||[]} scroll={{x:1000}} pagination={{total:data.total||0,pageSize:mode==='approval'?20:50}} rowSelection={mode==='approval'&&canReject?{selectedRowKeys:selected,onChange:value=>setSelected(value as string[]),getCheckboxProps:(row:any)=>({disabled:row.status!=='SUBMITTED'})}:undefined}/>
     </Card>
 
-    <Drawer title={`审核详情 - ${safe(detail?.documentNo,'未生成单号')}`} width={mobile?'100%':900} open={drawer} onClose={()=>setDrawer(false)} footer={<Space style={{display:'flex',justifyContent:'flex-end'}}><Button onClick={()=>setDrawer(false)}>关闭</Button>{detail?.status==='SUBMITTED'&&canReject&&<Button danger onClick={()=>setRejecting('single')}>驳回</Button>}{detail?.status==='SUBMITTED'&&canApprove&&<Button type="primary" icon={<CheckOutlined/>} onClick={approve}>审核通过</Button>}</Space>}>
-      {detail&&<><Descriptions column={mobile?1:2} bordered size="small" items={[{label:'业务类型',children:docName(detail.documentType)},{label:'状态',children:statusText[detail.status]||detail.status},{label:'送审意向仓库',children:`${safe(detail.warehouseCode)} ${safe(detail.warehouseName,'')}`},{label:'提交时间',children:formatBeijingTime(detail.submittedAt)},{label:'来源业务',children:safe(detail.sourceDocumentNo)},{label:'备注',children:safe(detail.notes)}]}/>{detail.documentType==='STOCK_CHECK'&&<div className="warehouse-stock-check-summary"><Tag color="blue">物料种类 {stockCheckSummary.items.size}</Tag><Tag color="green">一致 {stockCheckSummary.consistent.size}</Tag><Tag color={stockCheckSummary.different.size?'orange':'default'}>存在差异 {stockCheckSummary.different.size}</Tag><Tag color="blue">盘盈 {stockCheckSummary.surplus.size}</Tag><Tag color="orange">盘亏 {stockCheckSummary.loss.size}</Tag><Checkbox checked={onlyCheckDifferences} onChange={event=>setOnlyCheckDifferences(event.target.checked)}>仅看差异</Checkbox></div>}<Table size="small" rowKey="id" pagination={false} dataSource={detail.documentType==='STOCK_CHECK'?visibleStockCheckLines:(detail.lines||[])} columns={detail.documentType==='STOCK_CHECK'?stockCheckColumns:[{title:'物料',render:(_:any,row:any)=>`${row.itemCode} ${row.itemName}`},{title:'原库位',render:(_:any,row:any)=><LocationName location={row}/>},{title:'批次',dataIndex:'batchNo',render:safe},{title:'数量',render:(_:any,row:any)=>`${formatQuantity(row.quantity)} ${row.unit}`}]} style={{marginTop:16}}/>{detail.receiptAllocations?.length>0&&<Table size="small" rowKey={(row:any)=>`${row.documentLineId}-${row.disposition}-${row.locationId}`} pagination={false} dataSource={detail.receiptAllocations} columns={[{title:'分配',dataIndex:'disposition',render:(value:string)=>value==='NORMAL'?'正常品':'不良品'},{title:'仓库',dataIndex:'warehouseCode'},{title:'库位',render:(_:any,row:any)=><LocationName location={row}/>},{title:'数量',dataIndex:'quantity',render:formatQuantity},{title:'不良原因',dataIndex:'defectReason',render:safe}]} style={{marginTop:16}}/>}</>}
+    <Drawer title={`审核详情 - ${safe(detail?.documentNo,'未生成单号')}`} width={mobile?'100%':1120} open={drawer} onClose={()=>setDrawer(false)} footer={<Space style={{display:'flex',justifyContent:'flex-end'}}><Button onClick={()=>setDrawer(false)}>关闭</Button>{detail?.status==='SUBMITTED'&&canReject&&<Button danger onClick={()=>setRejecting('single')}>整单驳回</Button>}{detail?.status==='SUBMITTED'&&canApprove&&detail?.documentType==='MATERIAL_INBOUND'&&<Button type="primary" icon={<CheckOutlined/>} loading={reviewSaving} onClick={approveChecked}>通过勾选明细 ({checkedCount}/{materialReviewPending.length})</Button>}{detail?.status==='SUBMITTED'&&canApprove&&detail?.documentType!=='MATERIAL_INBOUND'&&<Button type="primary" icon={<CheckOutlined/>} onClick={approve}>审核通过</Button>}</Space>}>
+      {detail&&<><Descriptions column={mobile?1:2} bordered size="small" items={[{label:'业务类型',children:docName(detail.documentType)},{label:'状态',children:statusText[detail.status]||detail.status},{label:'送审意向仓库',children:`${safe(detail.warehouseCode)} ${safe(detail.warehouseName,'')}`},{label:'提交时间',children:formatBeijingTime(detail.submittedAt)},{label:'来源业务',children:safe(detail.sourceDocumentNo)},{label:'备注',children:safe(detail.notes)}]}/>{detail.documentType==='STOCK_CHECK'&&<div className="warehouse-stock-check-summary"><Tag color="blue">物料种类 {stockCheckSummary.items.size}</Tag><Tag color="green">一致 {stockCheckSummary.consistent.size}</Tag><Tag color={stockCheckSummary.different.size?'orange':'default'}>存在差异 {stockCheckSummary.different.size}</Tag><Tag color="blue">盘盈 {stockCheckSummary.surplus.size}</Tag><Tag color="orange">盘亏 {stockCheckSummary.loss.size}</Tag><Checkbox onChange={event=>setOnlyCheckDifferences(event.target.checked)}>仅看差异</Checkbox></div>}{detail.documentType==='STOCK_CHECK'?<Table size="small" rowKey="id" pagination={false} dataSource={visibleStockCheckLines} columns={stockCheckColumns} style={{marginTop:16}}/>:detail.documentType==='MATERIAL_INBOUND'?<><Typography.Paragraph type="secondary" style={{marginTop:16,marginBottom:6,fontSize:12}}></Typography.Paragraph><Table size="small" rowKey="id" pagination={false} scroll={{x:1098,y:440}} dataSource={detail.lines||[]} columns={materialReviewColumns} rowSelection={detail.status==='SUBMITTED'&&canApprove?{selectedRowKeys:materialReviewPending.filter((line:any)=>review[line.id]?.checked).map((line:any)=>line.id),onChange:(keys)=>setReview((current:any)=>{const next={...current};const set=new Set(keys as string[]);for(const line of materialReviewPending)if(next[line.id])next[line.id]={...next[line.id],checked:set.has(line.id)};return next;}),getCheckboxProps:(row:any)=>({disabled:(row.reviewStatus||'PENDING')!=='PENDING'})}:undefined}/></>:<Table size="small" rowKey="id" pagination={false} dataSource={detail.lines||[]} columns={[{title:'物料',render:(_:any,row:any)=>`${row.itemCode} ${row.itemName}`},{title:'原库位',render:(_:any,row:any)=><LocationName location={row}/>},{title:'批次',dataIndex:'batchNo',render:safe},{title:'数量',render:(_:any,row:any)=>`${formatQuantity(row.quantity)} ${row.unit}`}]} style={{marginTop:16}}/>}{detail.receiptAllocations?.length>0&&<Table size="small" rowKey={(row:any)=>`${row.documentLineId}-${row.disposition}-${row.locationId}`} pagination={false} dataSource={detail.receiptAllocations} columns={[{title:'分配',dataIndex:'disposition',render:(value:string)=>value==='NORMAL'?'正常品':'不良品'},{title:'仓库',dataIndex:'warehouseCode'},{title:'库位',render:(_:any,row:any)=><LocationName location={row}/>},{title:'数量',dataIndex:'quantity',render:formatQuantity},{title:'不良原因',dataIndex:'defectReason',render:safe}]} style={{marginTop:16}}/>}</>}
     </Drawer>
 
     <Modal width={850} title="入库审核分配" open={allocationOpen} onCancel={()=>setAllocationOpen(false)} onOk={()=>allocationForm.submit()} okText="审核通过并过账">
@@ -205,5 +285,7 @@ export function ApprovalsPage({user}:{user:User}) {
     </Modal>
 
     <Modal title={rejecting==='batch'?'批量驳回':'驳回单据'} open={Boolean(rejecting)} onCancel={()=>setRejecting(undefined)} onOk={()=>rejectForm.submit()} okText="确认驳回" okButtonProps={{danger:true}}><Form form={rejectForm} layout="vertical" onFinish={reject}><Form.Item name="reasonCode" label="常用原因"><Select allowClear options={rejectReasons.map(value=>({value,label:value}))}/></Form.Item><Form.Item name="reason" label="驳回原因" rules={[{required:true},{max:500}]}><Input.TextArea rows={4} maxLength={500}/></Form.Item></Form></Modal>
+
+    {detail?.documentType==='MATERIAL_INBOUND'&&<WarehouseLocationSelector zIndex={1200} open={Boolean(reviewPicker)} mode="inbound" itemId={reviewPicker?.itemId} queryScope={{warehouseId:detail.warehouseId}} selectedLocationId={reviewPicker?review[reviewPicker.lineId]?.locationId:undefined} onClose={()=>setReviewPicker(undefined)} onConfirm={(location:any)=>{if(!reviewPicker)return;const lineId=reviewPicker.lineId;setReview(current=>({...current,[lineId]:{...current[lineId],locationId:location.locationId,locationDisplay:location}}));setReviewPicker(undefined);}}/>}
   </div>;
 }

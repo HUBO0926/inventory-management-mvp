@@ -8,6 +8,7 @@ import {
   HistoryOutlined,
   ImportOutlined,
   InboxOutlined,
+  LoginOutlined,
   LogoutOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
@@ -56,6 +57,8 @@ export const routes = [
   { key: '/', label: '库存驾驶舱', icon: <DashboardOutlined />, roles: ['ADMIN', 'WAREHOUSE', 'PRODUCTION'], permission: 'stock.view', group: 'cockpit' },
 
   // 库存中心
+  // hidden：不在左侧导航显示，但路由保留——仓库管理页点「入库」仍会深链到 /inbound
+  { key: '/inbound', label: '原材料入库', icon: <LoginOutlined />, roles: ['ADMIN', 'WAREHOUSE'], permission: 'stock.view', group: 'stock', hidden: true },
   { key: '/virtual-warehouse', label: '虚拟仓库', icon: <DatabaseOutlined />, roles: ['ADMIN', 'WAREHOUSE', 'PRODUCTION'], permission: 'warehouse.virtual.view', group: 'stock' },
   { key: '/approvals', label: '审核中心', icon: <FileDoneOutlined />, roles: ['ADMIN', 'WAREHOUSE', 'PRODUCTION'], permission: 'approval.view-own', group: 'stock' },
   { key: '/notifications', label: '消息中心', icon: <BellOutlined />, roles: ['ADMIN', 'WAREHOUSE', 'PRODUCTION'], group: 'stock' },
@@ -170,7 +173,7 @@ function Shell({ user, onLogout }: { user: User; onLogout: () => void }) {
     || visibleKeys.includes(route.key)
     || Boolean(route.permission && user.permissions?.includes(route.permission))
     || Boolean('permissionsAny' in route && route.permissionsAny?.some(permission => user.permissions?.includes(permission))));
-  const visible = routes.filter(canOpen);
+  const visible = routes.filter(route => canOpen(route) && !('hidden' in route && route.hidden));
   useEffect(() => { let alive=true; const refresh=async()=>{try{const s=await api('/approvals/statistics');if(alive)setApprovalCount(Number(s?.pendingMine||0));}catch{if(alive)setApprovalCount(0);}};void refresh();const timer=window.setInterval(refresh,60000);window.addEventListener('inventory:refresh',refresh);return()=>{alive=false;clearInterval(timer);window.removeEventListener('inventory:refresh',refresh);};},[user.id]);
   useEffect(() => {
     let alive = true;
