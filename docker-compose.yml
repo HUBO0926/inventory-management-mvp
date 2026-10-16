@@ -29,6 +29,8 @@ services:
       INITIAL_DEMO_PASSWORD: ${INITIAL_DEMO_PASSWORD:-Demo@123456}
       API_PORT: 3001
       UPLOAD_ROOT: /app/uploads
+      BATCH_INBOUND_ENABLED: ${BATCH_INBOUND_ENABLED:-false}
+    command: ["sh", "-c", "node dist/database/run-migrations.js && node dist/database/seed.js && node dist/main.js"]
     volumes:
       - inventory_uploads:/app/uploads
     ports:

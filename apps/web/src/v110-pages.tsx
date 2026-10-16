@@ -226,8 +226,8 @@ function InboundItemCell({ index, form, items }: { index: number; form: any; ite
   const reviewStatus = Form.useWatch(['lines', index, 'reviewStatus'], form);
   const locked = reviewStatus === 'POSTED';
   return <Space size={4} style={{ width: '100%' }}>
-    <Form.Item name={[index, 'itemId']} rules={[{ required: true, message: '请选择物料' }]} style={{ marginBottom: 0, flex: 1, minWidth: 160 }}>
-      <Select disabled={locked} showSearch optionFilterProp="label" placeholder="选择物料" options={items.map(item => ({ value: item.itemId || item.id, label: `${item.itemCode} ${item.name}` }))}
+    <Form.Item label="物料" name={[index, 'itemId']} rules={[{ required: true, message: '请选择物料' }]} style={{ marginBottom: 0, flex: 1, minWidth: 160 }}>
+      <Select aria-label="物料" disabled={locked} showSearch optionFilterProp="label" placeholder="选择物料" options={items.map(item => ({ value: item.itemId || item.id, label: `${item.itemCode} ${item.name}` }))}
         onChange={(itemId) => {
           const next = [...(form.getFieldValue('lines') || [])];
           next[index] = { itemId, quantity: 1, locationId: undefined, locationPath: undefined, locationDisplay: undefined, batchId: undefined, warehouseId: undefined, zoneId: undefined };
@@ -249,7 +249,7 @@ function InboundLocationCell({ index, form, locations, onPick }: { index: number
     <Form.Item name={[index, 'locationId']} hidden rules={[{ required: true, message: '请选择入库位置' }]}><Input /></Form.Item>
     <Space size={4} wrap>
       {resolved ? <LocationName location={resolved} ellipsis /> : <Typography.Text type="secondary">{path || '未选择'}</Typography.Text>}
-      {!locked && <Button size="small" type="link" style={{ padding: 0 }} onClick={onPick}>{resolved ? '重选' : '选择'}</Button>}
+      {!locked && <Button aria-label={resolved ? '重新选择入库位置' : '选择入库位置'} size="small" type="link" style={{ padding: 0 }} onClick={onPick}>{resolved ? '重选' : '选择'}</Button>}
     </Space>
     <Form.Item noStyle shouldUpdate>{() => {
       const error = form.getFieldError(['lines', index, 'locationId'])?.[0];
@@ -268,12 +268,12 @@ function InboundBatchCell({ index, form, batches }: { index: number; form: any; 
 
 function InboundQuantityCell({ index, form }: { index: number; form: any }) {
   const locked = Form.useWatch(['lines', index, 'reviewStatus'], form) === 'POSTED';
-  return <Form.Item name={[index, 'quantity']} rules={[{ required: true, message: '必填' }]} style={{ marginBottom: 0 }}><InputNumber precision={0} min={1} disabled={locked} style={{ width: '100%' }} /></Form.Item>;
+  return <Form.Item label="数量" name={[index, 'quantity']} rules={[{ required: true, message: '必填' }]} style={{ marginBottom: 0 }}><InputNumber aria-label="入库数量" precision={0} min={1} disabled={locked} style={{ width: '100%' }} /></Form.Item>;
 }
 
 function InboundNotesCell({ index, form }: { index: number; form: any }) {
   const locked = Form.useWatch(['lines', index, 'reviewStatus'], form) === 'POSTED';
-  return <Form.Item name={[index, 'notes']} style={{ marginBottom: 0 }}><Input maxLength={300} disabled={locked} placeholder="包装明细等" /></Form.Item>;
+  return <Form.Item label="备注" name={[index, 'notes']} style={{ marginBottom: 0 }}><Input aria-label="明细备注" maxLength={300} disabled={locked} placeholder="包装明细等" /></Form.Item>;
 }
 
 function InboundReviewCell({ index, form }: { index: number; form: any }) {
@@ -313,6 +313,7 @@ export function StockDocumentsV110Page({ type }: { type: StockType }) {
   const [inboundPicker, setInboundPicker] = useState<{ index: number; itemId: string }>();
   const [saving, setSaving] = useState(false);
   const [batchOpen, setBatchOpen] = useState(false);
+  const [batchInboundEnabled, setBatchInboundEnabled] = useState(false);
   const savingRef = useRef(false);
   const sourceScope = useMemo(() => ({ warehouseId: new URLSearchParams(route.search).get('warehouseId') || undefined, zoneId: new URLSearchParams(route.search).get('zoneId') || undefined, locationId: new URLSearchParams(route.search).get('locationId') || undefined }), [route.search]);
   const load = () => Promise.all([
@@ -326,6 +327,7 @@ export function StockDocumentsV110Page({ type }: { type: StockType }) {
     setLocations(locationRows.items.map(normalize)); setBatches(batchRows.items.map(normalize));
   }).catch(fail);
   useEffect(() => { void load(); }, [type]);
+  useEffect(() => { api('/health').then((value: any) => setBatchInboundEnabled(value.features?.batchInbound === true)).catch(() => setBatchInboundEnabled(false)); }, []);
   useEffect(() => {
     const params = new URLSearchParams(route.search);
     if (openedFromQuery || params.get('new') !== '1') return;
@@ -459,7 +461,7 @@ export function StockDocumentsV110Page({ type }: { type: StockType }) {
         {['DRAFT', 'REJECTED'].includes(record.status) && <Popconfirm title="确认删除该草稿？" onConfirm={() => remove(record.id)}><Button danger type="link" icon={<DeleteOutlined />}>删除</Button></Popconfirm>}
       </Space> },
     ]} />
-    <Modal width={type === 'FINISHED_INBOUND' ? 1120 : type === 'MATERIAL_INBOUND' ? 1100 : 760} title={<div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, paddingRight: 28 }}><span>{`${editing ? '编辑' : '新建'}${meta.title}单`}</span>{inbound && !editing && <Button size="small" icon={<UploadOutlined />} onClick={() => setBatchOpen(true)}>Excel 批量导入</Button>}</div>} open={open} onCancel={() => setOpen(false)} onOk={() => form.submit()} confirmLoading={saving} destroyOnHidden footer={type === 'FINISHED_INBOUND' ? <Space><Button onClick={() => setOpen(false)}>取消</Button><Button loading={saving} onClick={() => form.validateFields().then(values => save(values, false)).catch(() => undefined)}>保存草稿</Button><Button type="primary" loading={saving} onClick={() => form.validateFields().then(values => save(values, true)).catch(() => undefined)}>保存并提交</Button></Space> : undefined}>
+    <Modal width={type === 'FINISHED_INBOUND' ? 1120 : type === 'MATERIAL_INBOUND' ? 1100 : 760} title={<div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, paddingRight: 28 }}><span>{`${editing ? '编辑' : '新建'}${meta.title}单`}</span>{inbound && batchInboundEnabled && !editing && <Button size="small" icon={<UploadOutlined />} onClick={() => setBatchOpen(true)}>Excel 批量导入</Button>}</div>} open={open} onCancel={() => setOpen(false)} onOk={() => form.submit()} confirmLoading={saving} destroyOnHidden footer={type === 'FINISHED_INBOUND' ? <Space><Button onClick={() => setOpen(false)}>取消</Button><Button loading={saving} onClick={() => form.validateFields().then(values => save(values, false)).catch(() => undefined)}>保存草稿</Button><Button type="primary" loading={saving} onClick={() => form.validateFields().then(values => save(values, true)).catch(() => undefined)}>保存并提交</Button></Space> : undefined}>
       <Form form={form} layout="vertical" onFinish={values => save(values, false)}>
         {type === 'FINISHED_INBOUND' ? <FinishedInboundEditor form={form} items={items} suggestedLocationId={form.getFieldValue('suggestedLocationId')} /> : type === 'MATERIAL_INBOUND' ? <>
         <Form.Item name="warehouseId" hidden><Input /></Form.Item>
@@ -579,6 +581,7 @@ const batchInboundLabels: Record<BatchInboundKind, { label: string; warehouseSam
 function BatchInboundModal({ open, kind, onClose, onCreated }: { open: boolean; kind: BatchInboundKind; onClose: () => void; onCreated: (doc?: BatchDocument) => void }) {
   const [uploading, setUploading] = useState(false);
   const [result, setResult] = useState<BatchResult | null>(null);
+  const requestKey = useRef<string | undefined>(undefined);
   const { label, warehouseSample } = batchInboundLabels[kind];
 
   const downloadTemplate = async () => {
@@ -595,10 +598,12 @@ function BatchInboundModal({ open, kind, onClose, onCreated }: { open: boolean; 
   const upload = async (file: File) => {
     setUploading(true);
     try {
+      requestKey.current ||= crypto.randomUUID();
       const form = new FormData();
       form.append('file', file, file.name);
-      const data: BatchResult = await api(`/stock-documents/${kind}/batch-import`, { method: 'POST', body: form });
+      const data: BatchResult = await api(`/stock-documents/${kind}/batch-import`, { method: 'POST', headers: { 'Idempotency-Key': requestKey.current }, body: form });
       setResult(data);
+      requestKey.current = undefined;
       if (data.documents.length) onCreated();
       if (data.successCount === 0) message.warning('全部行校验失败，未生成草稿单');
       else if (data.failureCount > 0) message.warning(`成功 ${data.successCount} 行，失败 ${data.failureCount} 行`);

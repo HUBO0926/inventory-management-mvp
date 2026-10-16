@@ -37,6 +37,7 @@ jobs:
         env:
           E2E_DATABASE_URL: postgresql://inventory:inventory_dev@localhost:5432/inventory_test
           JWT_SECRET: ci-test-secret-ci-test-secret
+          BATCH_INBOUND_ENABLED: 'true'
       - name: V1.0.0 upgrade migration
         run: pnpm test:upgrade
         env:
@@ -53,6 +54,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @inventory/web exec playwright install --with-deps chromium
       - run: docker compose -p inventory-ci up -d --build
+        env:
+          BATCH_INBOUND_ENABLED: 'true'
       - name: Wait for application
         run: timeout 180 sh -c 'until curl -fsS http://127.0.0.1:8080/api/health; do sleep 3; done'
       - name: Seed warehouse browser fixtures

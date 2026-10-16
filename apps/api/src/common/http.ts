@@ -49,11 +49,12 @@ export class ApiExceptionFilter implements ExceptionFilter {
         details = body.details;
       }
     } else {
-      // 非 HttpException（多为数据库/运行时异常）：把原始原因带出来，否则前端只能看到"服务器内部错误"，排查必须翻终端
+      // 非 HttpException 仅记录在服务端日志，避免向客户端暴露数据库和运行时细节。
       if (exception instanceof Error && exception.message) message = exception.message;
       this.logger.error(`[${requestId}] ${request.method} ${request.originalUrl} -> ${message}`, exception instanceof Error ? exception.stack : undefined);
     }
 
+    if (status === HttpStatus.INTERNAL_SERVER_ERROR) { message = '服务器内部错误'; details = undefined; }
     response.status(status).json({ success:false,code, message, data:null,details:details??null, requestId });
   }
 }

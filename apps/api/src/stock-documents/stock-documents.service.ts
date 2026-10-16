@@ -1,3 +1,5 @@
+import { createHash } from 'crypto';
+import { batchInboundEnabled, requireBatchInbound } from '../common/release-features';
 import { Injectable, Optional } from '@nestjs/common';
 import Decimal from 'decimal.js';
 import { DataSource, QueryRunner } from 'typeorm';
@@ -29,7 +31,7 @@ const BATCH_INBOUND_HEADERS: Record<string, string> = {
   所属仓库: 'warehouse', 仓库: 'warehouse',
   库区: 'zone',
   库位: 'location',
-  备注: 'notes',
+  备注: 'notes', 批次: 'batchNo', 批次号: 'batchNo',
 };
 const BATCH_INBOUND_REQUIRED_FIELDS = ['itemCode', 'quantity', 'warehouse', 'zone', 'location'] as const;
 const BATCH_INBOUND_HEADER_LABELS: Record<string, string> = { itemCode: '物料编码', quantity: '数量', warehouse: '所属仓库', zone: '库区', location: '库位' };
@@ -38,9 +40,9 @@ const BATCH_INBOUND_MAX_ROWS = 1000;
 type BatchRawLine = {
   row: number;
   itemCode: string; category: string; name: string; spec: string; quantity: string;
-  unit: string; warehouse: string; zone: string; location: string; notes: string;
+  unit: string; warehouse: string; zone: string; location: string; notes: string; batchNo: string;
 };
-type BatchValidLine = BatchRawLine & { itemId: string; warehouseId: string; locationId: string };
+type BatchValidLine = BatchRawLine & { itemId: string; warehouseId: string; locationId: string; batchId?: string };
 type BatchPlannedLine = BatchValidLine & { sources: BatchValidLine[] };
 type BatchFailure = { row: number; itemCode: string; itemName: string; warehouse: string; message: string; raw: BatchRawLine };
 type BatchWarning = { rows: string; itemCode: string; message: string };
@@ -62,12 +64,12 @@ const BATCH_INBOUND_KINDS: Record<BatchInboundKind, { documentType: DocumentType
 export class StockDocumentsService {
   constructor(private readonly db: DataSource, private readonly posting: InventoryPostingService, private readonly audit: AuditService, private readonly approvalHistory: ApprovalHistoryService, private readonly reservations: StockReservationService, private readonly workflow: ApprovalWorkflowService, private readonly warehouseAccess: WarehouseAccessService, @Optional() private readonly operations?: WarehouseManagementService) {}
 
-  async create(type: DocumentType, dto: any, user: AuthUser) {
+  async create(type: DocumentType, dto: any, user: AuthUser, transaction?: QueryRunner) {
     const userId = user.id;
     if (type === DocumentType.FINISHED_OUTBOUND && !dto.warehouseId) {
       throw this.lineError(0, 'locationId', 'SOURCE_LOCATION_REQUIRED', '请先选择来源库位');
     }
-    const qr = this.db.createQueryRunner(); await qr.connect(); await qr.startTransaction();
+    const qr = transaction || this.db.createQueryRunner(); if (!transaction) { await qr.connect(); await qr.startTransaction(); }
     try {
       const expectedType = type === DocumentType.MATERIAL_INBOUND ? 'RAW' : type === DocumentType.FINISHED_OUTBOUND || type === DocumentType.FINISHED_INBOUND ? 'FG' : undefined;
       const [warehouse] = dto.warehouseId
@@ -83,11 +85,13 @@ export class StockDocumentsService {
       const direction = [DocumentType.MATERIAL_INBOUND, DocumentType.FINISHED_INBOUND].includes(type) ? Direction.IN : Direction.OUT;
       const doc = await this.posting.createDocument(qr, { documentType: type, warehouseId: warehouse.id, notes: dto.notes, operator: user, lines: lines.map((line: any) => ({ ...line, direction: type === DocumentType.INVENTORY_ADJUSTMENT ? line.direction : direction })) }, userId);
       await this.audit.log(userId, 'CREATE_STOCK_DOCUMENT', 'stock_documents', doc.id, { type }, qr.manager);
+      if (transaction) return doc;
       await qr.commitTransaction(); return this.get(doc.id);
-    } catch (error) { await qr.rollbackTransaction(); throw error; } finally { await qr.release(); }
+    } catch (error) { if (!transaction) await qr.rollbackTransaction(); throw error; } finally { if (!transaction) await qr.release(); }
   }
 
   async batchInboundTemplate(kind: BatchInboundKind): Promise<Buffer> {
+    requireBatchInbound();
     const config = BATCH_INBOUND_KINDS[kind];
     const workbook = new Workbook();
     const sheet = workbook.addWorksheet('批量入库');
@@ -102,6 +106,7 @@ export class StockDocumentsService {
       { header: '库区', key: 'zone', width: 12 },
       { header: '库位', key: 'location', width: 10 },
       { header: '备注', key: 'notes', width: 24 },
+      { header: '批次', key: 'batchNo', width: 20 },
     ];
     sheet.addRow(config.sample);
     sheet.views = [{ state: 'frozen', ySplit: 1 }];
@@ -110,7 +115,14 @@ export class StockDocumentsService {
     return Buffer.from(await workbook.xlsx.writeBuffer());
   }
 
-  async batchImportInbound(kind: BatchInboundKind, file: Express.Multer.File | undefined, user: AuthUser) {
+  async batchImportInbound(kind: BatchInboundKind, file: Express.Multer.File | undefined, user: AuthUser, key?: string) {
+    requireBatchInbound();
+    if (!file) throw new BusinessException('VALIDATION_ERROR', '请选择要上传的 Excel 文件');
+    const digest = createHash('sha256').update(file.buffer).digest('hex');
+    return this.posting.executeIdempotent(user.id, key, 'POST:/stock-documents/' + kind + '/batch-import', { digest }, qr => this.importInbound(kind, file, user, qr));
+  }
+
+  private async importInbound(kind: BatchInboundKind, file: Express.Multer.File, user: AuthUser, qr: QueryRunner) {
     const config = BATCH_INBOUND_KINDS[kind];
     if (!file) throw new BusinessException('VALIDATION_ERROR', '请选择要上传的 Excel 文件');
     if (!/\.(xlsx|xlsm)$/i.test(file.originalname)) throw new BusinessException('VALIDATION_ERROR', '仅支持 .xlsx 格式的 Excel 文件');
@@ -162,6 +174,7 @@ export class StockDocumentsService {
         zone: readCell(excelRow, 'zone'),
         location: readCell(excelRow, 'location'),
         notes: readCell(excelRow, 'notes'),
+        batchNo: readCell(excelRow, 'batchNo'),
       };
       if (Object.entries(parsed).every(([key, value]) => key === 'row' || !value)) continue;
       rawLines.push(parsed);
@@ -196,12 +209,13 @@ export class StockDocumentsService {
         ? this.db.query(`SELECT id,code,name,warehouse_id "warehouseId",zone_id "zoneId",sort_order "sortOrder" FROM warehouse_locations WHERE status='ACTIVE' AND is_archived=false AND warehouse_id=ANY($1)`, [warehouseIds])
         : Promise.resolve([] as any[]),
       codes.length
-        ? this.db.query(`SELECT id,item_code "itemCode",name,unit,item_type "itemType",status FROM items WHERE item_code=ANY($1) AND deleted_at IS NULL`, [codes])
+        ? this.db.query(`SELECT id,item_code "itemCode",name,unit,item_type "itemType",enable_batch "enableBatch",status FROM items WHERE item_code=ANY($1) AND deleted_at IS NULL`, [codes])
         : Promise.resolve([] as any[]),
     ]);
     const matchText = (value: string, target: string | null | undefined) => Boolean(target) && (target === value || String(target).toLowerCase() === value.toLowerCase());
     const itemByCode = new Map<string, any>(itemRows.map((item: any) => [item.itemCode, item]));
 
+    const batchRows = itemRows.length ? await qr.query('SELECT id,item_id,batch_no,status FROM inventory_batches WHERE item_id=ANY($1::uuid[])', [itemRows.map((item:any)=>item.id)]) : [];
     const failures: BatchFailure[] = [];
     const addFailure = (line: BatchRawLine, message: string) => {
       failures.push({ row: line.row, itemCode: line.itemCode, itemName: line.name, warehouse: line.warehouse, message, raw: line });
@@ -228,7 +242,10 @@ export class StockDocumentsService {
       if (!item) { addFailure(line, '物料编码不存在，请先在物料档案中新建该物料'); continue; }
       if (item.status !== 'ACTIVE') { addFailure(line, '物料已停用，无法办理入库'); continue; }
       if (item.itemType !== config.itemType) { addFailure(line, `该物料不是${config.itemTypeLabel}，不能办理${config.itemTypeLabel}入库`); continue; }
-      validLines.push({ ...line, itemId: item.id, warehouseId: warehouse.id, locationId: location.id });
+      const batch = line.batchNo ? batchRows.find((row:any)=>row.item_id===item.id && row.batch_no===line.batchNo && row.status==='ACTIVE') : undefined;
+      if (line.batchNo && !batch) { addFailure(line, '批次不存在、已停用或不属于该物料，请先维护有效批次'); continue; }
+      if (item.enableBatch && !batch) { addFailure(line, '该物料启用了批次管理，请填写有效批次号'); continue; }
+      validLines.push({ ...line, itemId: item.id, warehouseId: warehouse.id, locationId: location.id, batchId: batch?.id });
     }
 
     // 按仓库分组；同一张单同一物料受 UNIQUE(document_id,item_id) 限制，同仓同物料重复行必须合并或报错
@@ -255,8 +272,8 @@ export class StockDocumentsService {
           continue;
         }
         const locationIds = new Set(sameItemLines.map(line => line.locationId));
-        if (locationIds.size > 1) {
-          for (const line of sameItemLines) addFailure(line, `物料编码 ${itemCode} 在同一仓库指定了多个不同库位，一张入库单中同一物料只能入一个库位，请调整后重新导入`);
+        if (locationIds.size > 1 || new Set(sameItemLines.map(line=>line.batchId || '')).size > 1) {
+          for (const line of sameItemLines) addFailure(line, `物料编码 ${itemCode} 在同一仓库指定了多个不同库位或批次，一张入库单中同一物料只能使用一个库位和批次，请调整后重新导入`);
           continue;
         }
         const total = sameItemLines.reduce((sum, line) => sum.add(line.quantity), new Decimal(0));
@@ -278,16 +295,20 @@ export class StockDocumentsService {
     let successCount = 0;
     for (const plan of plans) {
       const sourceRows = plan.lines.flatMap(line => line.sources);
+      await qr.query('SAVEPOINT batch_warehouse');
       try {
         const doc = await this.create(config.documentType, {
           warehouseId: plan.warehouse.id,
           notes: `Excel 批量导入${file.originalname ? `：${file.originalname}` : ''}`.slice(0, 500),
-          lines: plan.lines.map(line => ({ itemId: line.itemId, quantity: line.quantity, locationId: line.locationId, notes: line.notes || undefined })),
-        }, user);
+          lines: plan.lines.map(line => ({ itemId: line.itemId, quantity: line.quantity, locationId: line.locationId, batchId: line.batchId, notes: line.notes || undefined })),
+        }, user, qr);
+        await qr.query('RELEASE SAVEPOINT batch_warehouse');
         documents.push({ id: doc.id, documentNo: doc.documentNo, warehouseCode: plan.warehouse.warehouseCode, warehouseName: plan.warehouse.displayName, lineCount: plan.lines.length });
         successCount += sourceRows.length;
       } catch (error: any) {
-        const message = error?.message || '入库单创建失败';
+        await qr.query('ROLLBACK TO SAVEPOINT batch_warehouse');
+        await qr.query('RELEASE SAVEPOINT batch_warehouse');
+        const message = error instanceof BusinessException ? error.message : '入库单创建失败';
         for (const line of sourceRows) addFailure(line, `入库单创建失败：${message}`);
       }
     }
@@ -789,11 +810,15 @@ export class StockDocumentsService {
 
   /** MATERIAL_INBOUND 明细级审核：勾选行按（可能修改过的）数量/库位立即过账，其余行可逐条填原因驳回。 */
   approveLines(id: string, dto: any, key: string | undefined, userId: string, context: ApprovalContext = {}) {
-    return this.posting.executeIdempotent(userId, key, 'POST:/approvals/:id/approve-lines', { id, decisions: dto?.decisions || [] }, async qr => {
+    return this.posting.executeIdempotent(userId, key, 'POST:/approvals/:id/approve-lines', { id, decisions: dto?.decisions || [], receiptAllocations: dto?.receiptAllocations || null }, async qr => {
       const [doc] = await qr.query(`SELECT id,document_no,document_type,status,warehouse_id FROM stock_documents WHERE id=$1 FOR UPDATE`, [id]);
       if (!doc) throw new BusinessException('NOT_FOUND', '库存单据不存在');
       if (doc.document_type !== DocumentType.MATERIAL_INBOUND) throw new BusinessException('INVALID_STATUS', '逐条审核仅支持原材料入库单');
       if (doc.status !== 'SUBMITTED') throw new BusinessException('INVALID_STATUS', '只有待审核单据可以逐条审核');
+      if (!batchInboundEnabled()) {
+        const [alreadyStarted] = await qr.query("SELECT 1 FROM stock_document_lines WHERE document_id=$1 AND review_status='POSTED' LIMIT 1", [id]);
+        if (!alreadyStarted) requireBatchInbound();
+      }
       const [task] = await qr.query(`SELECT t.id FROM approval_task t JOIN approval_instance ai ON ai.id=t.approval_instance_id WHERE ai.document_id=$1 AND t.approver_user_id=$2 AND t.status='PENDING' FOR UPDATE`, [id, userId]);
       if (!task) throw new BusinessException('FORBIDDEN', '当前账号不是该审批任务的审批人');
       const decisions: any[] = Array.isArray(dto?.decisions) ? dto.decisions : [];
@@ -803,11 +828,12 @@ export class StockDocumentsService {
       const pending = await qr.query(`SELECT l.*,b.batch_no FROM stock_document_lines l LEFT JOIN inventory_batches b ON b.id=l.batch_id WHERE l.document_id=$1 AND l.review_status='PENDING' FOR UPDATE OF l`, [id]);
       const pendingMap = new Map<string, any>(pending.map((line: any) => [line.id, line]));
       for (const decision of decisions) {
+        if (!['APPROVE','REJECT'].includes(decision?.decision)) throw new BusinessException('VALIDATION_ERROR', '审核结论只能是 APPROVE 或 REJECT');
         if (!pendingMap.has(decision.lineId)) throw new BusinessException('VALIDATION_ERROR', '存在已处理或不属于本单的明细，请刷新后重试');
         if (decision.decision === 'REJECT' && !String(decision.reason || '').trim()) throw new BusinessException('VALIDATION_ERROR', '驳回明细必须填写不通过原因');
       }
       const [reviewer] = await qr.query(`SELECT username,COALESCE(employee_name,name,username) name FROM users WHERE id=$1`, [userId]);
-      const approvals = decisions.filter(item => item.decision !== 'REJECT');
+      const approvals = decisions.filter(item => item.decision === 'APPROVE');
       const rejects = decisions.filter(item => item.decision === 'REJECT');
       const coveredAll = decisions.length === pending.length;
       if (!coveredAll && rejects.length) throw new BusinessException('VALIDATION_ERROR', '还有未处理明细时只能逐条通过；需要驳回时请对全部明细给出结论');
@@ -844,8 +870,20 @@ export class StockDocumentsService {
         const reason = String(decision.reason || '').trim().slice(0, 500);
         await qr.query(`UPDATE stock_document_lines SET review_status='REJECTED',review_remark=$1,reviewed_by=$2,reviewed_at=now() WHERE id=$3`, [reason, userId, decision.lineId]);
       }
-      // 逐条审核不使用正常品/不良品分配；清理可能存在的旧分配数据
-      await qr.query(`DELETE FROM stock_document_receipt_allocations WHERE document_line_id IN (SELECT id FROM stock_document_lines WHERE document_id=$1)`, [id]);
+      // Only replace allocations for the pending lines being approved. Posted allocations are immutable here.
+      if (approvals.length) {
+        const ids = approvals.map(item=>item.lineId);
+        let allocations = dto?.receiptAllocations;
+        if (allocations === undefined) {
+          const existing = await qr.query('SELECT document_line_id "documentLineId",disposition,warehouse_id "warehouseId",location_id "locationId",batch_id "batchId",quantity,defect_reason "defectReason" FROM stock_document_receipt_allocations WHERE document_line_id=ANY($1::uuid[])', [ids]);
+          allocations = approvals.flatMap(decision => {
+            const saved = existing.filter((row:any)=>row.documentLineId===decision.lineId);
+            const line = pendingMap.get(decision.lineId);
+            return saved.length ? saved : [{ documentLineId: decision.lineId, disposition: 'NORMAL', warehouseId: doc.warehouse_id, locationId: decision.locationId || line.location_id, batchId: decision.batchId === undefined ? line.batch_id : decision.batchId, quantity: decision.quantity }];
+          });
+        }
+        await this.saveReceiptAllocations(qr, id, allocations, ids);
+      }
 
       const fullyApproved = coveredAll && rejects.length === 0;
       if (approvals.length) {
@@ -876,7 +914,8 @@ export class StockDocumentsService {
           if (instance?.applicant_user_id) await qr.query(`INSERT INTO notification(receiver_user_id,type,title,content,business_type,business_id) VALUES($1,'APPROVAL_LINE_POSTED','部分明细已入库',$2,$3,$4)`, [instance.applicant_user_id, `单据 ${doc.document_no} 有 ${approvals.length} 条明细已审核通过并入库存，其余明细仍在审核中。`, doc.document_type, id]);
         }
       }
-      return this.get(id);
+      const [result] = await qr.query('SELECT id,document_no "documentNo",status FROM stock_documents WHERE id=$1', [id]);
+      return result;
     });
   }
 
@@ -910,7 +949,13 @@ export class StockDocumentsService {
       if (!original) throw new BusinessException('NOT_FOUND', '库存单据不存在');
       await this.assertDocumentOperation(qr, id, user, original.warehouse_id);
       if (original.status !== 'POSTED' || original.document_type === DocumentType.REVERSAL) throw new BusinessException('INVALID_STATUS', '只有已过账的非冲销单据可以冲销');
-      const transactions = await qr.query(`SELECT t.warehouse_id,t.location_id,t.item_id,t.batch_id,abs(t.delta_qty)::text quantity,CASE WHEN t.delta_qty>0 THEN 'OUT' ELSE 'IN' END direction FROM stock_transactions t WHERE t.source_document_id=$1 ORDER BY t.warehouse_id,t.location_id,t.item_id`, [id]);
+      const transactions = await qr.query(`SELECT t.item_id,
+        sum(abs(t.delta_qty))::text quantity,
+        (array_agg(t.warehouse_id ORDER BY t.warehouse_id,t.location_id,t.batch_id))[1] warehouse_id,
+        (array_agg(t.location_id ORDER BY t.warehouse_id,t.location_id,t.batch_id))[1] location_id,
+        (array_agg(t.batch_id ORDER BY t.warehouse_id,t.location_id,t.batch_id))[1] batch_id,
+        (array_agg(CASE WHEN t.delta_qty>0 THEN 'OUT' ELSE 'IN' END ORDER BY t.warehouse_id,t.location_id,t.batch_id))[1] direction
+        FROM stock_transactions t WHERE t.source_document_id=$1 GROUP BY t.item_id ORDER BY t.item_id`, [id]);
       if (original.document_type === DocumentType.STOCK_CHECK && !transactions.length) {
         await qr.query(`UPDATE stock_documents SET status='VOIDED',voided_by=$1,voided_by_user_id=$1,voided_by_username=(SELECT username FROM users WHERE id=$1),voided_by_name=(SELECT COALESCE(employee_name,name) FROM users WHERE id=$1),voided_at=now(),updated_at=now() WHERE id=$2`,[userId,id]);
         await this.audit.log(userId,'VOID_ZERO_DIFFERENCE_STOCK_CHECK','stock_documents',id,{reason},qr.manager);
@@ -1039,8 +1084,10 @@ export class StockDocumentsService {
     for(const line of lines){const [balance]=await qr.query(`SELECT on_hand_qty FROM stock_balances WHERE warehouse_id=$1 AND location_id=$2 AND item_id=$3 AND batch_id IS NOT DISTINCT FROM $4 FOR UPDATE`,[line.warehouse_id,line.location_id,line.item_id,line.batch_id]);const snapshot=new Decimal(balance?.on_hand_qty||0);await qr.query(`UPDATE stock_check_lines SET system_qty_snapshot=$1,difference_qty=$2,updated_at=now() WHERE id=$3`,[snapshot.toFixed(0),new Decimal(line.counted_qty).sub(snapshot).toFixed(0),line.id]);}
   }
 
-  private async saveReceiptAllocations(qr: QueryRunner, documentId: string, allocations: any[]) {
-    const lines = await qr.query(`SELECT id,item_id,quantity,location_id,batch_id FROM stock_document_lines WHERE document_id=$1 ORDER BY id`, [documentId]);
+  private async saveReceiptAllocations(qr: QueryRunner, documentId: string, allocations: any[], lineIds?: string[]) {
+    const lines = await qr.query(`SELECT id,item_id,quantity,location_id,batch_id,review_status FROM stock_document_lines WHERE document_id=$1 ${lineIds ? 'AND id=ANY($2::uuid[])' : ''} ORDER BY id`, lineIds ? [documentId,lineIds] : [documentId]);
+    if (lines.some((line:any)=>line.review_status !== 'PENDING')) throw new BusinessException('INVALID_STATUS', '已处理明细不可重复分配或过账');
+    if (lineIds && lines.length !== lineIds.length) throw new BusinessException('VALIDATION_ERROR', '分配明细不属于当前单据');
     if (!Array.isArray(allocations) || !allocations.length) throw new BusinessException('VALIDATION_ERROR', '入库审核必须填写正常品或不良品入库分配');
     const allowed = new Set(lines.map((line: any) => line.id));
     if (allocations.some(row => !allowed.has(row.documentLineId))) throw new BusinessException('VALIDATION_ERROR', '审核分配包含不属于该单据的明细');
