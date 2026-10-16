@@ -66,7 +66,7 @@ export class StockReservationService {
       const allocations = await qr.query(`SELECT a.document_line_id "lineId",a.id "allocationId",a.warehouse_id "warehouseId",a.location_id "locationId",l.item_id "itemId",a.quantity
         FROM stock_document_receipt_allocations a JOIN stock_document_lines l ON l.id=a.document_line_id WHERE l.document_id=$1`, [documentId]);
       targets = allocations.length ? allocations : await qr.query(`SELECT l.id "lineId",NULL::uuid "allocationId",COALESCE(l.target_warehouse_id,l.source_warehouse_id,d.warehouse_id) "warehouseId",COALESCE(l.target_location_id,l.location_id) "locationId",l.item_id "itemId",l.quantity
-        FROM stock_document_lines l JOIN stock_documents d ON d.id=l.document_id WHERE l.document_id=$1 AND l.direction='IN'`, [documentId]);
+        FROM stock_document_lines l JOIN stock_documents d ON d.id=l.document_id WHERE l.document_id=$1 AND l.direction='IN' AND l.review_status='PENDING'`, [documentId]);
     }
     const grouped = new Map<string, any>();
     for (const target of targets) {
@@ -108,5 +108,19 @@ export class StockReservationService {
       [documentId],
     );
     await qr.query(`UPDATE location_capacity_reservations SET status='CONSUMED',released_at=now() WHERE document_id=$1 AND status='ACTIVE'`, [documentId]);
+  }
+
+  /** Consumes only the holds attached to specific lines, leaving other lines' holds ACTIVE for later review rounds. */
+  async consumeLines(qr: QueryRunner, documentId: string, lineIds: string[]) {
+    await qr.query(
+      `UPDATE stock_reservations SET status='CONSUMED',released_at=now()
+       WHERE document_id=$1 AND status='ACTIVE' AND document_line_id=ANY($2::uuid[])`,
+      [documentId, lineIds],
+    );
+    await qr.query(
+      `UPDATE location_capacity_reservations SET status='CONSUMED',released_at=now()
+       WHERE document_id=$1 AND status='ACTIVE' AND document_line_id=ANY($2::uuid[])`,
+      [documentId, lineIds],
+    );
   }
 }

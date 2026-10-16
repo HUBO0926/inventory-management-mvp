@@ -1,5 +1,7 @@
-import { Body, Controller, Delete, Get, Headers, Param, Patch, Post, Query, Res } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Headers, Param, Patch, Post, Query, Res, UploadedFile, UseInterceptors } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { memoryStorage } from 'multer';
 import { ArrayMinSize, IsArray, IsIn, IsOptional, IsString, MaxLength, ValidateNested } from 'class-validator';
 import { Type } from 'class-transformer';
 import { CurrentUser, Permissions } from '../auth/auth.decorators';
@@ -7,7 +9,7 @@ import { AuthUser, DocumentType } from '../common/constants';
 import { IsQuantity } from '../common/validation';
 import { StockDocumentsService } from './stock-documents.service';
 
-class StockLineDto { @IsString() itemId:string; @IsQuantity() quantity:string; @IsOptional() @IsString() locationId?:string;@IsOptional() @IsString() batchId?:string; @IsOptional() @IsString() @MaxLength(80) batchNo?:string; @IsOptional() @IsString() targetWarehouseId?:string; @IsOptional() @IsString() targetLocationId?:string; @IsOptional() @IsString() targetBatchId?:string; @IsOptional() @IsString() @MaxLength(300) notes?:string; }
+class StockLineDto { @IsOptional() @IsString() id?:string; @IsString() itemId:string; @IsQuantity() quantity:string; @IsOptional() @IsString() locationId?:string;@IsOptional() @IsString() batchId?:string; @IsOptional() @IsString() @MaxLength(80) batchNo?:string; @IsOptional() @IsString() targetWarehouseId?:string; @IsOptional() @IsString() targetLocationId?:string; @IsOptional() @IsString() targetBatchId?:string; @IsOptional() @IsString() @MaxLength(300) notes?:string; }
 class StockDocumentDto { @IsArray() @ArrayMinSize(1) @ValidateNested({each:true}) @Type(()=>StockLineDto) lines:StockLineDto[];@IsOptional()@IsString()warehouseId?:string; @IsOptional() @IsString() @MaxLength(500) notes?:string; }
 class VoidDto { @IsOptional() @IsString() @MaxLength(500) reason?:string; }
 class AdjustmentLineDto{@IsString()itemId:string;@IsString()locationId:string;@IsOptional()@IsString()batchId?:string;@IsString()adjustmentQty:string;@IsOptional()@IsString()@MaxLength(300)notes?:string}
@@ -51,8 +53,20 @@ export class StockDocumentsController{
   @Permissions('stock.create') @Get('finished-inbound/item-distribution') finishedInboundDistribution(@Query()q:FinishedInboundItemQueryDto,@CurrentUser()u:AuthUser){return this.service.finishedInboundDistribution(q.itemId,u,q.suggestedLocationId);}
   @Permissions('stock.create') @Get('finished-inbound/location-tree') finishedInboundLocationTree(@Query()q:FinishedInboundLocationTreeQueryDto,@CurrentUser()u:AuthUser){return this.service.finishedInboundLocationTree(q,u);}
   @Permissions('stock.view') @Get('target-location-tree') targetLocationTree(@Query()q:TargetLocationTreeQueryDto,@CurrentUser()u:AuthUser){return this.service.targetLocationTree(q,u);}
+  @Permissions('stock.view') @Get('material-inbound/batch-template') async materialInboundBatchTemplate(@Res()response:any){const buffer=await this.service.batchInboundTemplate('material-inbound');response.setHeader('Content-Type','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');response.setHeader('Content-Disposition',`attachment; filename*=UTF-8''${encodeURIComponent('原材料批量入库模板.xlsx')}`);response.send(buffer);}
+  @Permissions('stock.view') @Get('finished-inbound/batch-template') async finishedInboundBatchTemplate(@Res()response:any){const buffer=await this.service.batchInboundTemplate('finished-inbound');response.setHeader('Content-Type','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');response.setHeader('Content-Disposition',`attachment; filename*=UTF-8''${encodeURIComponent('成品批量入库模板.xlsx')}`);response.send(buffer);}
   @Permissions('stock.view') @Get(':id') get(@Param('id')id:string,@CurrentUser()u:AuthUser){return this.service.get(id,u);}
   @Permissions('stock.create') @Post('material-inbound') inbound(@Body()dto:StockDocumentDto,@CurrentUser()u:AuthUser){return this.service.create(DocumentType.MATERIAL_INBOUND,dto,u);}
+  @Permissions('stock.create') @Post('material-inbound/batch-import') @UseInterceptors(FileInterceptor('file',{storage:memoryStorage(),limits:{fileSize:10*1024*1024,files:1}})) materialInboundBatchImport(@UploadedFile()file:Express.Multer.File|undefined,@CurrentUser()u:AuthUser){
+    // multer 默认按 latin1 解析文件名，中文会乱码，入口处转回 UTF-8
+    if (file?.originalname) file.originalname = Buffer.from(file.originalname, 'latin1').toString('utf8');
+    return this.service.batchImportInbound('material-inbound',file,u);
+  }
+  @Permissions('stock.create') @Post('finished-inbound/batch-import') @UseInterceptors(FileInterceptor('file',{storage:memoryStorage(),limits:{fileSize:10*1024*1024,files:1}})) finishedInboundBatchImport(@UploadedFile()file:Express.Multer.File|undefined,@CurrentUser()u:AuthUser){
+    // multer 默认按 latin1 解析文件名，中文会乱码，入口处转回 UTF-8
+    if (file?.originalname) file.originalname = Buffer.from(file.originalname, 'latin1').toString('utf8');
+    return this.service.batchImportInbound('finished-inbound',file,u);
+  }
   @Permissions('stock.create') @Post('finished-inbound') finishedInbound(@Body()dto:StockDocumentDto,@CurrentUser()u:AuthUser){return this.service.create(DocumentType.FINISHED_INBOUND,dto,u);}
   @Permissions('stock.create') @Post('finished-outbound') outbound(@Body()dto:StockDocumentDto,@CurrentUser()u:AuthUser){return this.service.create(DocumentType.FINISHED_OUTBOUND,dto,u);}
   @Permissions('stock.adjust') @Post('inventory-adjustment') adjustment(@Body()dto:AdjustmentDto,@CurrentUser()u:AuthUser){return this.service.createAdjustment(dto,u);}

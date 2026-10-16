@@ -1,6 +1,7 @@
 import { Injectable, Optional } from '@nestjs/common';
 import Decimal from 'decimal.js';
 import { DataSource, QueryRunner } from 'typeorm';
+import { Workbook, type Row } from 'exceljs';
 import { AuditService } from '../audit/audit.service';
 import { ApprovalContext, ApprovalHistoryService } from '../audit/approval-history.service';
 import { BusinessException } from '../common/business.exception';
@@ -16,6 +17,45 @@ const warehouseTypeForItem = (itemType: ItemType) => {
   if (itemType === ItemType.MATERIAL) return 'RAW';
   if (itemType === ItemType.FINISHED_GOOD) return 'FG';
   throw new BusinessException('VALIDATION_ERROR', '物料类型不支持仓储操作');
+};
+
+const BATCH_INBOUND_HEADERS: Record<string, string> = {
+  物料编码: 'itemCode', 编码: 'itemCode',
+  类别: 'category',
+  产品名称: 'name', 名称: 'name',
+  规格: 'spec',
+  数量: 'quantity',
+  单位: 'unit',
+  所属仓库: 'warehouse', 仓库: 'warehouse',
+  库区: 'zone',
+  库位: 'location',
+  备注: 'notes',
+};
+const BATCH_INBOUND_REQUIRED_FIELDS = ['itemCode', 'quantity', 'warehouse', 'zone', 'location'] as const;
+const BATCH_INBOUND_HEADER_LABELS: Record<string, string> = { itemCode: '物料编码', quantity: '数量', warehouse: '所属仓库', zone: '库区', location: '库位' };
+const BATCH_INBOUND_MAX_ROWS = 1000;
+
+type BatchRawLine = {
+  row: number;
+  itemCode: string; category: string; name: string; spec: string; quantity: string;
+  unit: string; warehouse: string; zone: string; location: string; notes: string;
+};
+type BatchValidLine = BatchRawLine & { itemId: string; warehouseId: string; locationId: string };
+type BatchPlannedLine = BatchValidLine & { sources: BatchValidLine[] };
+type BatchFailure = { row: number; itemCode: string; itemName: string; warehouse: string; message: string; raw: BatchRawLine };
+type BatchWarning = { rows: string; itemCode: string; message: string };
+
+export type BatchInboundKind = 'material-inbound' | 'finished-inbound';
+/** 原材料与成品批量入库共用同一套模板列与校验流程，差异只在单据类型、仓库类型、物料类型和示例行 */
+const BATCH_INBOUND_KINDS: Record<BatchInboundKind, { documentType: DocumentType; warehouseType: 'RAW' | 'FG'; itemType: ItemType; itemTypeLabel: string; warehouseLabel: string; templateName: string; sample: Record<string, string | number> }> = {
+  'material-inbound': {
+    documentType: DocumentType.MATERIAL_INBOUND, warehouseType: 'RAW', itemType: ItemType.MATERIAL, itemTypeLabel: '原材料', warehouseLabel: '原材料仓', templateName: '原材料批量入库模板.xlsx',
+    sample: { itemCode: '10070017', category: '电池', name: '骑马卡', spec: '孔位12.5', quantity: 100, unit: '个', warehouse: '原材料库-固安', zone: '备货区A', location: '01', notes: '示例行，导入前请删除' },
+  },
+  'finished-inbound': {
+    documentType: DocumentType.FINISHED_INBOUND, warehouseType: 'FG', itemType: ItemType.FINISHED_GOOD, itemTypeLabel: '成品', warehouseLabel: '成品仓', templateName: '成品批量入库模板.xlsx',
+    sample: { itemCode: 'FG-001', category: '成品', name: '监测终端', spec: '标准版', quantity: 10, unit: '台', warehouse: 'DEMO 成品一仓', zone: '收发库区', location: '01', notes: '示例行，导入前请删除' },
+  },
 };
 
 @Injectable()
@@ -45,6 +85,223 @@ export class StockDocumentsService {
       await this.audit.log(userId, 'CREATE_STOCK_DOCUMENT', 'stock_documents', doc.id, { type }, qr.manager);
       await qr.commitTransaction(); return this.get(doc.id);
     } catch (error) { await qr.rollbackTransaction(); throw error; } finally { await qr.release(); }
+  }
+
+  async batchInboundTemplate(kind: BatchInboundKind): Promise<Buffer> {
+    const config = BATCH_INBOUND_KINDS[kind];
+    const workbook = new Workbook();
+    const sheet = workbook.addWorksheet('批量入库');
+    sheet.columns = [
+      { header: '物料编码', key: 'itemCode', width: 14 },
+      { header: '类别', key: 'category', width: 12 },
+      { header: '产品名称', key: 'name', width: 28 },
+      { header: '规格', key: 'spec', width: 16 },
+      { header: '数量', key: 'quantity', width: 10 },
+      { header: '单位', key: 'unit', width: 8 },
+      { header: '所属仓库', key: 'warehouse', width: 20 },
+      { header: '库区', key: 'zone', width: 12 },
+      { header: '库位', key: 'location', width: 10 },
+      { header: '备注', key: 'notes', width: 24 },
+    ];
+    sheet.addRow(config.sample);
+    sheet.views = [{ state: 'frozen', ySplit: 1 }];
+    sheet.getRow(1).font = { bold: true };
+    sheet.getRow(2).font = { color: { argb: 'FF999999' }, italic: true };
+    return Buffer.from(await workbook.xlsx.writeBuffer());
+  }
+
+  async batchImportInbound(kind: BatchInboundKind, file: Express.Multer.File | undefined, user: AuthUser) {
+    const config = BATCH_INBOUND_KINDS[kind];
+    if (!file) throw new BusinessException('VALIDATION_ERROR', '请选择要上传的 Excel 文件');
+    if (!/\.(xlsx|xlsm)$/i.test(file.originalname)) throw new BusinessException('VALIDATION_ERROR', '仅支持 .xlsx 格式的 Excel 文件');
+    const workbook = new Workbook();
+    try {
+      await workbook.xlsx.load(file.buffer as any);
+    } catch {
+      throw new BusinessException('VALIDATION_ERROR', '无法解析文件，请上传有效的 .xlsx 文件');
+    }
+    const sheet = workbook.worksheets[0];
+    if (!sheet) throw new BusinessException('VALIDATION_ERROR', '文件中没有工作表');
+
+    const columnByField = new Map<string, number>();
+    sheet.getRow(1).eachCell({ includeEmpty: false }, (cell, colNumber) => {
+      const text = String(cell.value ?? '').replace(/[\s\u3000]+/g, '');
+      const field = BATCH_INBOUND_HEADERS[text];
+      if (field && !columnByField.has(field)) columnByField.set(field, colNumber);
+    });
+    const missingHeaders = BATCH_INBOUND_REQUIRED_FIELDS.filter(field => !columnByField.has(field));
+    if (missingHeaders.length) {
+      throw new BusinessException('VALIDATION_ERROR', `模板缺少必填列：${missingHeaders.map(field => BATCH_INBOUND_HEADER_LABELS[field]).join('、')}，请下载最新模板填写`);
+    }
+    const readCell = (row: Row, field: string) => {
+      const col = columnByField.get(field);
+      if (!col) return '';
+      const value = row.getCell(col).value as any;
+      if (value === null || value === undefined) return '';
+      if (typeof value === 'object') {
+        if (typeof value.text === 'string') return value.text.trim();
+        if (value.result !== undefined && value.result !== null) return String(value.result).trim();
+        if (Array.isArray(value.richText)) return value.richText.map((part: any) => part?.text || '').join('').trim();
+        return '';
+      }
+      return String(value).trim();
+    };
+
+    const rawLines: BatchRawLine[] = [];
+    for (let rowNumber = 2; rowNumber <= sheet.rowCount; rowNumber += 1) {
+      const excelRow = sheet.getRow(rowNumber);
+      const parsed: BatchRawLine = {
+        row: rowNumber,
+        itemCode: readCell(excelRow, 'itemCode'),
+        category: readCell(excelRow, 'category'),
+        name: readCell(excelRow, 'name'),
+        spec: readCell(excelRow, 'spec'),
+        quantity: readCell(excelRow, 'quantity'),
+        unit: readCell(excelRow, 'unit'),
+        warehouse: readCell(excelRow, 'warehouse'),
+        zone: readCell(excelRow, 'zone'),
+        location: readCell(excelRow, 'location'),
+        notes: readCell(excelRow, 'notes'),
+      };
+      if (Object.entries(parsed).every(([key, value]) => key === 'row' || !value)) continue;
+      rawLines.push(parsed);
+    }
+    if (!rawLines.length) throw new BusinessException('VALIDATION_ERROR', '文件中没有数据行');
+    if (rawLines.length > BATCH_INBOUND_MAX_ROWS) throw new BusinessException('VALIDATION_ERROR', `单次最多导入 ${BATCH_INBOUND_MAX_ROWS} 行，当前 ${rawLines.length} 行，请拆分后上传`);
+
+    // 预加载当前账号有权限的目标类型仓库、库区、库位与物料档案，全部在内存中匹配
+    const accessibleWarehouseIds = await this.warehouseAccess.getAccessibleWarehouseIds(user);
+    const warehouses: any[] = await this.db.query(
+      `SELECT id,warehouse_code "warehouseCode",name,COALESCE(display_name,name) "displayName"
+       FROM warehouses WHERE warehouse_type='${config.warehouseType}' AND status='ACTIVE' AND deleted_at IS NULL
+       ${accessibleWarehouseIds === null ? '' : 'AND id=ANY($1::uuid[])'}`,
+      accessibleWarehouseIds === null ? [] : [accessibleWarehouseIds],
+    );
+    const warehouseIndex = new Map<string, any>();
+    for (const warehouse of warehouses) {
+      for (const key of [warehouse.warehouseCode, warehouse.name, warehouse.displayName]) {
+        if (key) {
+          warehouseIndex.set(String(key).trim(), warehouse);
+          warehouseIndex.set(String(key).trim().toLowerCase(), warehouse);
+        }
+      }
+    }
+    const warehouseIds = warehouses.map((warehouse: any) => warehouse.id);
+    const codes = [...new Set(rawLines.map(line => line.itemCode).filter(Boolean))];
+    const [zones, locations, itemRows] = await Promise.all([
+      warehouseIds.length
+        ? this.db.query(`SELECT id,code,name,warehouse_id "warehouseId" FROM warehouse_zones WHERE status='ACTIVE' AND deleted_at IS NULL AND warehouse_id=ANY($1)`, [warehouseIds])
+        : Promise.resolve([] as any[]),
+      warehouseIds.length
+        ? this.db.query(`SELECT id,code,name,warehouse_id "warehouseId",zone_id "zoneId",sort_order "sortOrder" FROM warehouse_locations WHERE status='ACTIVE' AND is_archived=false AND warehouse_id=ANY($1)`, [warehouseIds])
+        : Promise.resolve([] as any[]),
+      codes.length
+        ? this.db.query(`SELECT id,item_code "itemCode",name,unit,item_type "itemType",status FROM items WHERE item_code=ANY($1) AND deleted_at IS NULL`, [codes])
+        : Promise.resolve([] as any[]),
+    ]);
+    const matchText = (value: string, target: string | null | undefined) => Boolean(target) && (target === value || String(target).toLowerCase() === value.toLowerCase());
+    const itemByCode = new Map<string, any>(itemRows.map((item: any) => [item.itemCode, item]));
+
+    const failures: BatchFailure[] = [];
+    const addFailure = (line: BatchRawLine, message: string) => {
+      failures.push({ row: line.row, itemCode: line.itemCode, itemName: line.name, warehouse: line.warehouse, message, raw: line });
+    };
+    const validLines: BatchValidLine[] = [];
+    for (const line of rawLines) {
+      if (!line.itemCode) { addFailure(line, '物料编码为空'); continue; }
+      if (!/^[1-9]\d{0,17}$/.test(line.quantity)) { addFailure(line, '数量必须是大于 0 的整数'); continue; }
+      if (!line.warehouse) { addFailure(line, '所属仓库为空'); continue; }
+      const warehouse = warehouseIndex.get(line.warehouse) || warehouseIndex.get(line.warehouse.toLowerCase());
+      if (!warehouse) { addFailure(line, `仓库不存在、已停用、不是${config.warehouseLabel}或当前账号无该仓库权限`); continue; }
+      if (!line.zone) { addFailure(line, '库区为空'); continue; }
+      const zone = zones.find((row: any) => row.warehouseId === warehouse.id && (matchText(line.zone, row.code) || matchText(line.zone, row.name)));
+      if (!zone) { addFailure(line, `仓库下不存在库区「${line.zone}」或库区已停用`); continue; }
+      if (!line.location) { addFailure(line, '库位为空'); continue; }
+      // 库位在该库区范围内匹配：①完整编码/名称（AA-备货区A-01）②编码末段短码（01）③纯数字序号（1 或 01）
+      const zoneLocations = locations.filter((row: any) => row.warehouseId === warehouse.id && row.zoneId === zone.id);
+      const numericSeq = /^\d{1,3}$/.test(line.location) ? Number(line.location) : null;
+      const location = zoneLocations.find((row: any) => matchText(line.location, row.code) || matchText(line.location, row.name))
+        || zoneLocations.find((row: any) => String(row.code || '').split('-').pop() === line.location)
+        || (numericSeq !== null ? zoneLocations.find((row: any) => Number(row.sortOrder) === numericSeq) : undefined);
+      if (!location) { addFailure(line, `库区「${line.zone}」下不存在库位「${line.location}」或库位已停用（可填编号末段如 01，或完整编码 ${warehouse.warehouseCode}-${zone.name}-01）`); continue; }
+      const item = itemByCode.get(line.itemCode);
+      if (!item) { addFailure(line, '物料编码不存在，请先在物料档案中新建该物料'); continue; }
+      if (item.status !== 'ACTIVE') { addFailure(line, '物料已停用，无法办理入库'); continue; }
+      if (item.itemType !== config.itemType) { addFailure(line, `该物料不是${config.itemTypeLabel}，不能办理${config.itemTypeLabel}入库`); continue; }
+      validLines.push({ ...line, itemId: item.id, warehouseId: warehouse.id, locationId: location.id });
+    }
+
+    // 按仓库分组；同一张单同一物料受 UNIQUE(document_id,item_id) 限制，同仓同物料重复行必须合并或报错
+    const warnings: BatchWarning[] = [];
+    const plans: Array<{ warehouse: any; lines: BatchPlannedLine[] }> = [];
+    for (const warehouseId of [...new Set(validLines.map(line => line.warehouseId))]) {
+      const group = validLines.filter(line => line.warehouseId === warehouseId);
+      const byItem = new Map<string, BatchValidLine[]>();
+      for (const line of group) {
+        const sameItem = byItem.get(line.itemCode) || [];
+        sameItem.push(line);
+        byItem.set(line.itemCode, sameItem);
+      }
+      const plannedLines: BatchPlannedLine[] = [];
+      for (const [itemCode, sameItemLines] of byItem) {
+        if (sameItemLines.length === 1) {
+          plannedLines.push({ ...sameItemLines[0], sources: sameItemLines });
+          continue;
+        }
+        const names = new Set(sameItemLines.map(line => line.name).filter(Boolean));
+        const specs = new Set(sameItemLines.map(line => line.spec).filter(Boolean));
+        if (names.size > 1 || specs.size > 1) {
+          for (const line of sameItemLines) addFailure(line, `物料编码 ${itemCode} 在表中重复且产品名称/规格不一致，请核实编码是否抄错`);
+          continue;
+        }
+        const locationIds = new Set(sameItemLines.map(line => line.locationId));
+        if (locationIds.size > 1) {
+          for (const line of sameItemLines) addFailure(line, `物料编码 ${itemCode} 在同一仓库指定了多个不同库位，一张入库单中同一物料只能入一个库位，请调整后重新导入`);
+          continue;
+        }
+        const total = sameItemLines.reduce((sum, line) => sum.add(line.quantity), new Decimal(0));
+        if (total.gte('1000000000000000000')) {
+          for (const line of sameItemLines) addFailure(line, `物料编码 ${itemCode} 合并后数量超出系统上限`);
+          continue;
+        }
+        const notes = [...new Set(sameItemLines.map(line => line.notes).filter(Boolean))].join(' / ').slice(0, 300);
+        plannedLines.push({ ...sameItemLines[0], quantity: total.toFixed(0), notes, sources: sameItemLines });
+        warnings.push({ rows: sameItemLines.map(line => line.row).join('、'), itemCode, message: `同仓库同库位重复 ${sameItemLines.length} 行，已自动合并为数量 ${total.toFixed(0)}` });
+      }
+      if (plannedLines.length) {
+        plans.push({ warehouse: warehouses.find((row: any) => row.id === warehouseId), lines: plannedLines });
+      }
+    }
+
+    // 每个仓库生成一张草稿入库单；单个仓库建单失败（如库位容量不足）只影响该仓的行
+    const documents: any[] = [];
+    let successCount = 0;
+    for (const plan of plans) {
+      const sourceRows = plan.lines.flatMap(line => line.sources);
+      try {
+        const doc = await this.create(config.documentType, {
+          warehouseId: plan.warehouse.id,
+          notes: `Excel 批量导入${file.originalname ? `：${file.originalname}` : ''}`.slice(0, 500),
+          lines: plan.lines.map(line => ({ itemId: line.itemId, quantity: line.quantity, locationId: line.locationId, notes: line.notes || undefined })),
+        }, user);
+        documents.push({ id: doc.id, documentNo: doc.documentNo, warehouseCode: plan.warehouse.warehouseCode, warehouseName: plan.warehouse.displayName, lineCount: plan.lines.length });
+        successCount += sourceRows.length;
+      } catch (error: any) {
+        const message = error?.message || '入库单创建失败';
+        for (const line of sourceRows) addFailure(line, `入库单创建失败：${message}`);
+      }
+    }
+
+    failures.sort((a, b) => a.row - b.row);
+    return {
+      totalCount: rawLines.length,
+      successCount,
+      failureCount: failures.length,
+      warningCount: warnings.length,
+      documents,
+      failures,
+      warnings,
+    };
   }
 
   async createMove(dto: any, user: AuthUser) {
@@ -80,16 +337,38 @@ export class StockDocumentsService {
         await this.approvalHistory.record(qr,id,'WITHDRAWN','SUBMITTED','DRAFT',userId,{ reason:'编辑待审核单据自动撤回' });
       }
       if (![DocumentType.MATERIAL_INBOUND, DocumentType.FINISHED_INBOUND, DocumentType.FINISHED_OUTBOUND, DocumentType.STOCK_MOVE].includes(doc.document_type)) throw new BusinessException('INVALID_STATUS', '该单据不能在此编辑');
-      const lines = doc.document_type === DocumentType.STOCK_MOVE
+      let lines = doc.document_type === DocumentType.STOCK_MOVE
         ? dto.lines : doc.document_type === DocumentType.FINISHED_INBOUND ? dto.lines : await this.fillDefaultLocations(qr, dto.lines, doc.warehouse_id);
+      // 部分过账后的原材料入库单：POSTED 明细不可改，从编辑载荷中剔除并原样保留
+      let postedLines: any[] = [];
+      if (doc.document_type === DocumentType.MATERIAL_INBOUND) {
+        postedLines = await qr.query(`SELECT id,item_id FROM stock_document_lines WHERE document_id=$1 AND review_status='POSTED'`, [id]);
+        if (postedLines.length) {
+          const postedIds = new Set(postedLines.map((line: any) => line.id));
+          lines = lines.filter((line: any) => !postedIds.has(line.id));
+          const conflicts = await qr.query(`SELECT i.item_code FROM stock_document_lines l JOIN items i ON i.id=l.item_id WHERE l.document_id=$1 AND l.review_status='POSTED' AND l.item_id=ANY($2::uuid[])`, [id, lines.map((line: any) => line.itemId)]);
+          if (conflicts.length) throw new BusinessException('VALIDATION_ERROR', `物料 ${conflicts[0].item_code} 已审核入库，不能在本单重复添加`);
+        }
+      }
       if (doc.document_type === DocumentType.FINISHED_INBOUND) await this.prepareFinishedInboundLines(qr, lines, doc.warehouse_id);
       if (doc.document_type === DocumentType.STOCK_MOVE) await this.validateMoveLines(qr, lines, doc.warehouse_id);
       else await this.validateManualLines(qr, doc.document_type, lines, doc.warehouse_id);
       if (doc.document_type === DocumentType.STOCK_MOVE) await this.warehouseAccess.assertWarehouses(user, [doc.warehouse_id, ...lines.map((line: any) => line.targetWarehouseId)]);
       const direction = [DocumentType.MATERIAL_INBOUND, DocumentType.FINISHED_INBOUND].includes(doc.document_type) ? Direction.IN : Direction.OUT;
       await qr.query(`UPDATE stock_documents SET notes=$1,status='DRAFT',submitted_by=NULL,submitted_at=NULL,rejection_reason=NULL,updated_at=now() WHERE id=$2`, [dto.notes || null, id]);
-      await qr.query(`DELETE FROM stock_document_lines WHERE document_id=$1`, [id]);
-      for (const line of lines) await this.insertLine(qr, id, doc.warehouse_id, { ...line, direction });
+      if (postedLines.length) {
+        const existing = await qr.query(`SELECT id FROM stock_document_lines WHERE document_id=$1 AND review_status<>'POSTED'`, [id]);
+        const existingIds = new Set(existing.map((row: any) => row.id));
+        const keepIds = lines.filter((line: any) => line.id && existingIds.has(line.id)).map((line: any) => line.id);
+        await qr.query(`DELETE FROM stock_document_lines WHERE document_id=$1 AND review_status<>'POSTED'${keepIds.length ? ' AND id<>ALL($2)' : ''}`, keepIds.length ? [id, keepIds] : [id]);
+        for (const line of lines) {
+          if (line.id && existingIds.has(line.id)) await qr.query(`UPDATE stock_document_lines SET item_id=$1,quantity=$2,location_id=$3,batch_id=$4,notes=$5 WHERE id=$6 AND document_id=$7 AND review_status<>'POSTED'`, [line.itemId, line.quantity, line.locationId, line.batchId || null, line.notes || null, line.id, id]);
+          else await this.insertLine(qr, id, doc.warehouse_id, { ...line, direction });
+        }
+      } else {
+        await qr.query(`DELETE FROM stock_document_lines WHERE document_id=$1`, [id]);
+        for (const line of lines) await this.insertLine(qr, id, doc.warehouse_id, { ...line, direction });
+      }
       await this.audit.log(userId, 'UPDATE_STOCK_DOCUMENT', 'stock_documents', id, undefined, qr.manager);
       await qr.commitTransaction(); return this.get(id);
     } catch (error) { await qr.rollbackTransaction(); throw error; } finally { await qr.release(); }
@@ -107,6 +386,8 @@ export class StockDocumentsService {
       if (!doc) throw new BusinessException('NOT_FOUND', '库存单据不存在');
       await this.assertDocumentOperation(qr, id, user, doc.warehouse_id);
       if (!['DRAFT', 'REJECTED'].includes(doc.status)) throw new BusinessException('INVALID_STATUS', '只有草稿或已驳回单据可以取消');
+      const [postedLine] = await qr.query(`SELECT 1 FROM stock_document_lines WHERE document_id=$1 AND review_status='POSTED' LIMIT 1`, [id]);
+      if (postedLine) throw new BusinessException('INVALID_STATUS', '该单据已有明细审核入库，不能取消整单');
       await this.reservations.releaseDocument(qr, id);
       await qr.query(`UPDATE stock_documents SET status='CANCELLED',updated_at=now() WHERE id=$1`, [id]);
       await this.approvalHistory.record(qr, id, 'CANCELLED', doc.status, 'CANCELLED', userId, { reason:'用户取消单据' });
@@ -122,7 +403,11 @@ export class StockDocumentsService {
     try { const [doc] = await qr.query(`SELECT status,warehouse_id,document_type FROM stock_documents WHERE id=$1 FOR UPDATE`, [id]); if (!doc) throw new BusinessException('NOT_FOUND', '库存单据不存在'); await this.assertDocumentOperation(qr,id,user,doc.warehouse_id); if (doc.status==='SUBMITTED') { await qr.commitTransaction(); return this.get(id); } if (!['DRAFT','REJECTED'].includes(doc.status)) throw new BusinessException('INVALID_STATUS', '只有草稿或已驳回单据可以提交');
       if (doc.document_type === DocumentType.STOCK_CHECK) await this.captureStockCheckSnapshot(qr,id);
       else {
-        const operationLines = await qr.query(`SELECT location_id "locationId",target_location_id "targetLocationId",item_id "itemId",direction FROM stock_document_lines WHERE document_id=$1`, [id]);
+        // 部分过账后的单据重新提交：驳回行恢复待审，已过账行不再参与校验和预留
+        await qr.query(`UPDATE stock_document_lines SET review_status='PENDING',review_remark=NULL,reviewed_by=NULL,reviewed_at=NULL,review_changes='[]'::jsonb WHERE document_id=$1 AND review_status='REJECTED'`, [id]);
+        const [{ pending_count: pendingCount }] = await qr.query(`SELECT count(*)::int pending_count FROM stock_document_lines WHERE document_id=$1 AND review_status='PENDING'`, [id]);
+        if (!pendingCount) throw new BusinessException('VALIDATION_ERROR', '单据没有可提交的明细');
+        const operationLines = await qr.query(`SELECT location_id "locationId",target_location_id "targetLocationId",item_id "itemId",direction FROM stock_document_lines WHERE document_id=$1 AND review_status='PENDING'`, [id]);
         try {
           await this.operations?.assertOperationAllowed(qr, operationLines.flatMap((line: any) => [line.locationId,line.targetLocationId]), operationLines.flatMap((line: any) => line.targetLocationId?[{locationId:line.targetLocationId,itemId:line.itemId}]:line.direction===Direction.IN?[{locationId:line.locationId,itemId:line.itemId}]:[]));
           await this.reservations.reserveDocument(qr,id);
@@ -499,6 +784,99 @@ export class StockDocumentsService {
         throw error;
       }
       await this.approvalHistory.record(qr,id,'APPROVED','SUBMITTED','POSTED',userId,{ ...context, idempotencyKey:key }); await this.finishApprovalTask(qr,id,userId,'APPROVED'); return result;
+    });
+  }
+
+  /** MATERIAL_INBOUND 明细级审核：勾选行按（可能修改过的）数量/库位立即过账，其余行可逐条填原因驳回。 */
+  approveLines(id: string, dto: any, key: string | undefined, userId: string, context: ApprovalContext = {}) {
+    return this.posting.executeIdempotent(userId, key, 'POST:/approvals/:id/approve-lines', { id, decisions: dto?.decisions || [] }, async qr => {
+      const [doc] = await qr.query(`SELECT id,document_no,document_type,status,warehouse_id FROM stock_documents WHERE id=$1 FOR UPDATE`, [id]);
+      if (!doc) throw new BusinessException('NOT_FOUND', '库存单据不存在');
+      if (doc.document_type !== DocumentType.MATERIAL_INBOUND) throw new BusinessException('INVALID_STATUS', '逐条审核仅支持原材料入库单');
+      if (doc.status !== 'SUBMITTED') throw new BusinessException('INVALID_STATUS', '只有待审核单据可以逐条审核');
+      const [task] = await qr.query(`SELECT t.id FROM approval_task t JOIN approval_instance ai ON ai.id=t.approval_instance_id WHERE ai.document_id=$1 AND t.approver_user_id=$2 AND t.status='PENDING' FOR UPDATE`, [id, userId]);
+      if (!task) throw new BusinessException('FORBIDDEN', '当前账号不是该审批任务的审批人');
+      const decisions: any[] = Array.isArray(dto?.decisions) ? dto.decisions : [];
+      if (!decisions.length) throw new BusinessException('VALIDATION_ERROR', '请至少选择一条明细进行审核');
+      if (new Set(decisions.map(item => item.lineId)).size !== decisions.length) throw new BusinessException('VALIDATION_ERROR', '同一明细不能重复审核');
+      // FOR UPDATE 必须限定到明细表：LEFT JOIN 的可空一侧（inventory_batches）不允许加行锁，否则 PostgreSQL 直接报错
+      const pending = await qr.query(`SELECT l.*,b.batch_no FROM stock_document_lines l LEFT JOIN inventory_batches b ON b.id=l.batch_id WHERE l.document_id=$1 AND l.review_status='PENDING' FOR UPDATE OF l`, [id]);
+      const pendingMap = new Map<string, any>(pending.map((line: any) => [line.id, line]));
+      for (const decision of decisions) {
+        if (!pendingMap.has(decision.lineId)) throw new BusinessException('VALIDATION_ERROR', '存在已处理或不属于本单的明细，请刷新后重试');
+        if (decision.decision === 'REJECT' && !String(decision.reason || '').trim()) throw new BusinessException('VALIDATION_ERROR', '驳回明细必须填写不通过原因');
+      }
+      const [reviewer] = await qr.query(`SELECT username,COALESCE(employee_name,name,username) name FROM users WHERE id=$1`, [userId]);
+      const approvals = decisions.filter(item => item.decision !== 'REJECT');
+      const rejects = decisions.filter(item => item.decision === 'REJECT');
+      const coveredAll = decisions.length === pending.length;
+      if (!coveredAll && rejects.length) throw new BusinessException('VALIDATION_ERROR', '还有未处理明细时只能逐条通过；需要驳回时请对全部明细给出结论');
+      if (coveredAll === false && !approvals.length) throw new BusinessException('VALIDATION_ERROR', '请至少选择一条通过的明细');
+
+      for (const decision of approvals) {
+        const line = pendingMap.get(decision.lineId);
+        const quantity = String(decision.quantity ?? '').trim();
+        if (!/^[1-9]\d{0,17}$/.test(quantity)) throw new BusinessException('VALIDATION_ERROR', `${line.item_id} 入库数量必须是正整数`);
+        const locationId = decision.locationId || line.location_id;
+        const [location] = await qr.query(`SELECT loc.id,loc.code,w.warehouse_type FROM warehouse_locations loc JOIN warehouses w ON w.id=loc.warehouse_id WHERE loc.id=$1 AND loc.warehouse_id=$2 AND loc.status='ACTIVE' AND loc.is_archived=false AND w.status='ACTIVE' AND w.deleted_at IS NULL`, [locationId, doc.warehouse_id]);
+        if (!location || location.warehouse_type !== 'RAW') throw new BusinessException('VALIDATION_ERROR', '入库库位不存在、已停用或不属于该原材料仓库');
+        let batchId: string | null = line.batch_id;
+        if (decision.batchId !== undefined) {
+          batchId = decision.batchId || null;
+          if (batchId) {
+            const [batch] = await qr.query(`SELECT id FROM inventory_batches WHERE id=$1 AND item_id=$2`, [batchId, line.item_id]);
+            if (!batch) throw new BusinessException('VALIDATION_ERROR', '批次与物料不匹配');
+          }
+        }
+        const changes: any[] = Array.isArray(line.review_changes) ? line.review_changes : [];
+        if (quantity !== new Decimal(line.quantity).toFixed(0)) changes.push({ field: 'quantity', before: line.quantity, after: quantity, by: reviewer?.name || reviewer?.username || userId, at: new Date().toISOString() });
+        if (locationId !== line.location_id) {
+          const [beforeLocation] = await qr.query(`SELECT code FROM warehouse_locations WHERE id=$1`, [line.location_id]);
+          changes.push({ field: 'locationId', before: beforeLocation?.code || line.location_id, after: location.code, by: reviewer?.name || reviewer?.username || userId, at: new Date().toISOString() });
+        }
+        if (batchId !== line.batch_id) {
+          const [afterBatch] = await qr.query(`SELECT batch_no FROM inventory_batches WHERE id=$1`, [batchId]);
+          changes.push({ field: 'batchId', before: line.batch_no || null, after: afterBatch?.batch_no || null, by: reviewer?.name || reviewer?.username || userId, at: new Date().toISOString() });
+        }
+        await qr.query(`UPDATE stock_document_lines SET quantity=$1,location_id=$2,batch_id=$3,review_changes=$4::jsonb,reviewed_by=$5,reviewed_at=now(),review_remark=NULL WHERE id=$6`, [quantity, locationId, batchId, JSON.stringify(changes), userId, decision.lineId]);
+      }
+      for (const decision of rejects) {
+        const reason = String(decision.reason || '').trim().slice(0, 500);
+        await qr.query(`UPDATE stock_document_lines SET review_status='REJECTED',review_remark=$1,reviewed_by=$2,reviewed_at=now() WHERE id=$3`, [reason, userId, decision.lineId]);
+      }
+      // 逐条审核不使用正常品/不良品分配；清理可能存在的旧分配数据
+      await qr.query(`DELETE FROM stock_document_receipt_allocations WHERE document_line_id IN (SELECT id FROM stock_document_lines WHERE document_id=$1)`, [id]);
+
+      const fullyApproved = coveredAll && rejects.length === 0;
+      if (approvals.length) {
+        await this.posting.applyDocument(qr, id, userId, ['SUBMITTED'], { lineIds: approvals.map(item => item.lineId), finalizeHeader: fullyApproved });
+      }
+      const [{ pending_count: pendingCount }] = await qr.query(`SELECT count(*)::int pending_count FROM stock_document_lines WHERE document_id=$1 AND review_status='PENDING'`, [id]);
+
+      if (fullyApproved) {
+        await this.approvalHistory.record(qr, id, 'APPROVED', 'SUBMITTED', 'POSTED', userId, { ...context, idempotencyKey: key, lineReview: true });
+        await this.finishApprovalTask(qr, id, userId, 'APPROVED');
+      } else {
+        const reasonSummary = rejects.map((decision: any) => {
+          const line = pendingMap.get(decision.lineId);
+          return `${line.item_id}：${String(decision.reason || '').trim()}`;
+        }).join('；').slice(0, 500);
+        if (pendingCount === 0) {
+          await this.reservations.releaseDocument(qr, id);
+          await qr.query(`UPDATE stock_documents SET status='REJECTED',rejected_by=$1,rejected_by_user_id=$1,
+            rejected_by_username=(SELECT username FROM users WHERE id=$1),rejected_by_name=(SELECT name FROM users WHERE id=$1),
+            rejected_at=now(),rejection_reason=$2,updated_at=now() WHERE id=$3`, [userId, `部分明细已通过入库，未通过明细：${reasonSummary}`, id]);
+          await this.approvalHistory.record(qr, id, 'PARTIAL_APPROVED', 'SUBMITTED', 'REJECTED', userId, { ...context, reason: reasonSummary, approvedLineIds: approvals.map((item: any) => item.lineId), rejectedLineIds: rejects.map((item: any) => item.lineId) });
+          await this.finishApprovalTask(qr, id, userId, 'REJECTED', `部分明细已通过入库，未通过明细：${reasonSummary}`);
+          await this.audit.log(userId, 'PARTIAL_APPROVE_STOCK_DOCUMENT', 'stock_documents', id, { approvedLineIds: approvals.map((item: any) => item.lineId), rejectedLineIds: rejects.map((item: any) => item.lineId) }, qr.manager);
+        } else {
+          await this.approvalHistory.record(qr, id, 'PARTIAL_APPROVED', 'SUBMITTED', 'SUBMITTED', userId, { ...context, reason: reasonSummary || undefined, approvedLineIds: approvals.map((item: any) => item.lineId), pendingCount });
+          await this.audit.log(userId, 'PARTIAL_APPROVE_STOCK_DOCUMENT', 'stock_documents', id, { approvedLineIds: approvals.map((item: any) => item.lineId), pendingCount }, qr.manager);
+          const [instance] = await qr.query(`SELECT applicant_user_id FROM approval_instance WHERE document_id=$1 FOR UPDATE`, [id]);
+          if (instance?.applicant_user_id) await qr.query(`INSERT INTO notification(receiver_user_id,type,title,content,business_type,business_id) VALUES($1,'APPROVAL_LINE_POSTED','部分明细已入库',$2,$3,$4)`, [instance.applicant_user_id, `单据 ${doc.document_no} 有 ${approvals.length} 条明细已审核通过并入库存，其余明细仍在审核中。`, doc.document_type, id]);
+        }
+      }
+      return this.get(id);
     });
   }
 
@@ -917,7 +1295,9 @@ export class StockDocumentsService {
         l.batch_id "batchId",b.batch_no "batchNo",l.target_warehouse_id "targetWarehouseId",
         tw.warehouse_code "targetWarehouseCode",tz.code "targetZoneCode",
         l.target_location_id "targetLocationId",tl.code "targetLocationCode",tl.code "targetLocationDisplayName",NULLIF(tz.actual_location,'未填写') "targetActualPosition",
-        l.target_batch_id "targetBatchId",po.order_no "productionOrderNo"
+        l.target_batch_id "targetBatchId",po.order_no "productionOrderNo",
+        l.review_status "reviewStatus",l.review_remark "reviewRemark",l.review_changes "reviewChanges",
+        l.reviewed_at "reviewedAt",COALESCE(ru.name,ru.username) "reviewedByName"
       FROM stock_document_lines l
       JOIN stock_documents d ON d.id=l.document_id
       JOIN items i ON i.id=l.item_id
@@ -925,6 +1305,7 @@ export class StockDocumentsService {
       JOIN warehouse_zones sz ON sz.id=loc.zone_id
       JOIN warehouses sw ON sw.id=COALESCE(l.source_warehouse_id,d.warehouse_id)
       LEFT JOIN inventory_batches b ON b.id=l.batch_id
+      LEFT JOIN users ru ON ru.id=l.reviewed_by
       LEFT JOIN warehouses tw ON tw.id=l.target_warehouse_id
       LEFT JOIN warehouse_locations tl ON tl.id=l.target_location_id
       LEFT JOIN warehouse_zones tz ON tz.id=tl.zone_id
@@ -938,8 +1319,9 @@ export class StockDocumentsService {
     doc.receiptAllocations = await this.db.query(`SELECT a.document_line_id "documentLineId",a.disposition,a.warehouse_id "warehouseId",w.warehouse_code "warehouseCode",a.location_id "locationId",l.code "locationCode",l.code "locationDisplayName",NULLIF(z.actual_location,'未填写') "actualPosition",a.batch_id "batchId",a.quantity,a.defect_reason "defectReason" FROM stock_document_receipt_allocations a JOIN stock_document_lines dl ON dl.id=a.document_line_id JOIN warehouses w ON w.id=a.warehouse_id JOIN warehouse_locations l ON l.id=a.location_id JOIN warehouse_zones z ON z.id=l.zone_id WHERE dl.document_id=$1 ORDER BY a.id`, [id]);
     doc.operationRecords = await this.db.query(`
       SELECT action,COALESCE(actor_name,actor_username,'—') "actorName",created_at "createdAt",
-        CASE WHEN status_after='REJECTED' THEN '驳回' ELSE '成功' END result,
+        CASE WHEN status_after='REJECTED' AND action<>'PARTIAL_APPROVED' THEN '驳回' ELSE '成功' END result,
         COALESCE(reason,CASE action WHEN 'SUBMITTED' THEN '提交审核' WHEN 'APPROVED' THEN '审核通过并过账'
+          WHEN 'PARTIAL_APPROVED' THEN '部分明细审核通过'
           WHEN 'WITHDRAWN' THEN '撤回单据' WHEN 'CANCELLED' THEN '取消单据' ELSE action END) description
       FROM approval_records WHERE document_id=$1
       UNION ALL

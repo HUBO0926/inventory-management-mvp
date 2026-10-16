@@ -2,9 +2,9 @@
 import dayjs from 'dayjs';
 import { useRef } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { Button, Card, Checkbox, Descriptions, Drawer, Form, Input, InputNumber, Modal, Popconfirm, Select, Space, Switch, Tag, Typography, message } from 'antd';
-import { DeleteOutlined, DownloadOutlined, PlusOutlined } from '@ant-design/icons';
-import { api, idempotencyKey, token } from './api';
+import { Alert, Button, Card, Checkbox, Descriptions, Drawer, Form, Input, InputNumber, Modal, Popconfirm, Select, Space, Switch, Tag, Tooltip, Typography, Upload, message } from 'antd';
+import { DeleteOutlined, DownloadOutlined, InboxOutlined, PlusOutlined, UploadOutlined } from '@ant-design/icons';
+import { API_BASE, api, idempotencyKey, token } from './api';
 import { PageScaffold, StatusTag } from './components';
 import { ResponsiveTable as Table } from './responsive';
 import { formatBeijingTime, formatQuantity, statusText } from './domain';
@@ -222,12 +222,77 @@ const stockMeta: Record<StockType, { title: string; endpoint: string; itemType?:
   STOCK_MOVE: { title: '移库', endpoint: '/stock-documents/move' },
 };
 
+function InboundItemCell({ index, form, items }: { index: number; form: any; items: any[] }) {
+  const reviewStatus = Form.useWatch(['lines', index, 'reviewStatus'], form);
+  const locked = reviewStatus === 'POSTED';
+  return <Space size={4} style={{ width: '100%' }}>
+    <Form.Item name={[index, 'itemId']} rules={[{ required: true, message: '请选择物料' }]} style={{ marginBottom: 0, flex: 1, minWidth: 160 }}>
+      <Select disabled={locked} showSearch optionFilterProp="label" placeholder="选择物料" options={items.map(item => ({ value: item.itemId || item.id, label: `${item.itemCode} ${item.name}` }))}
+        onChange={(itemId) => {
+          const next = [...(form.getFieldValue('lines') || [])];
+          next[index] = { itemId, quantity: 1, locationId: undefined, locationPath: undefined, locationDisplay: undefined, batchId: undefined, warehouseId: undefined, zoneId: undefined };
+          form.setFieldValue('lines', next);
+        }} />
+    </Form.Item>
+    {locked && <Tag color="green">已入库</Tag>}
+  </Space>;
+}
+
+function InboundLocationCell({ index, form, locations, onPick }: { index: number; form: any; locations: any[]; onPick: () => void }) {
+  const locationId = Form.useWatch(['lines', index, 'locationId'], form);
+  const display = Form.useWatch(['lines', index, 'locationDisplay'], form);
+  const path = Form.useWatch(['lines', index, 'locationPath'], form);
+  const locked = Form.useWatch(['lines', index, 'reviewStatus'], form) === 'POSTED';
+  // 打开已保存单据（含 Excel 批量导入）时只有 locationId，没有 locationDisplay，需要按 id 反查库位编码
+  const resolved = locations.find((location: any) => location.id === locationId) || display;
+  return <div>
+    <Form.Item name={[index, 'locationId']} hidden rules={[{ required: true, message: '请选择入库位置' }]}><Input /></Form.Item>
+    <Space size={4} wrap>
+      {resolved ? <LocationName location={resolved} ellipsis /> : <Typography.Text type="secondary">{path || '未选择'}</Typography.Text>}
+      {!locked && <Button size="small" type="link" style={{ padding: 0 }} onClick={onPick}>{resolved ? '重选' : '选择'}</Button>}
+    </Space>
+    <Form.Item noStyle shouldUpdate>{() => {
+      const error = form.getFieldError(['lines', index, 'locationId'])?.[0];
+      return error ? <Typography.Text type="danger" style={{ fontSize: 12 }}>{error}</Typography.Text> : null;
+    }}</Form.Item>
+  </div>;
+}
+
+function InboundBatchCell({ index, form, batches }: { index: number; form: any; batches: any[] }) {
+  const itemId = Form.useWatch(['lines', index, 'itemId'], form);
+  const locked = Form.useWatch(['lines', index, 'reviewStatus'], form) === 'POSTED';
+  return <Form.Item name={[index, 'batchId']} style={{ marginBottom: 0 }}>
+    <Select disabled={locked} allowClear placeholder="无批次" options={batches.filter(batch => batch.itemId === itemId).map(batch => ({ value: batch.id, label: batch.batchNo }))} />
+  </Form.Item>;
+}
+
+function InboundQuantityCell({ index, form }: { index: number; form: any }) {
+  const locked = Form.useWatch(['lines', index, 'reviewStatus'], form) === 'POSTED';
+  return <Form.Item name={[index, 'quantity']} rules={[{ required: true, message: '必填' }]} style={{ marginBottom: 0 }}><InputNumber precision={0} min={1} disabled={locked} style={{ width: '100%' }} /></Form.Item>;
+}
+
+function InboundNotesCell({ index, form }: { index: number; form: any }) {
+  const locked = Form.useWatch(['lines', index, 'reviewStatus'], form) === 'POSTED';
+  return <Form.Item name={[index, 'notes']} style={{ marginBottom: 0 }}><Input maxLength={300} disabled={locked} placeholder="包装明细等" /></Form.Item>;
+}
+
+function InboundReviewCell({ index, form }: { index: number; form: any }) {
+  const reviewStatus = Form.useWatch(['lines', index, 'reviewStatus'], form);
+  const remark = Form.useWatch(['lines', index, 'reviewRemark'], form);
+  const changes = Form.useWatch(['lines', index, 'reviewChanges'], form);
+  if (reviewStatus === 'POSTED') return <Tooltip title={Array.isArray(changes) && changes.length ? changes.map((c: any, i: number) => `${i + 1}. ${c.by} 将${c.field === 'quantity' ? '数量' : c.field === 'locationId' ? '库位' : '批次'} ${c.before ?? '空'} → ${c.after ?? '空'}`).join('\n') : '审核通过'}><Tag color="green">已入库</Tag></Tooltip>;
+  if (reviewStatus === 'REJECTED' && remark) return <Tooltip title={remark}><Tag color="red">已驳回</Tag></Tooltip>;
+  return null;
+}
+
 export function StockDocumentsV110Page({ type }: { type: StockType }) {
   const meta = stockMeta[type];
   const adjustment = type === 'INVENTORY_ADJUSTMENT';
   const moving = type === 'STOCK_MOVE';
   const inbound = type === 'MATERIAL_INBOUND' || type === 'FINISHED_INBOUND';
   const outbound = type === 'FINISHED_OUTBOUND';
+  // 原材料 / 成品入库共用同一套 Excel 批量导入，后端按 kind 区分单据类型、仓库类型与物料类型
+  const batchKind: BatchInboundKind = type === 'FINISHED_INBOUND' ? 'finished-inbound' : 'material-inbound';
   const [rows, setRows] = useState<any[]>([]);
   const [items, setItems] = useState<any[]>([]);
   const [warehouses, setWarehouses] = useState<any[]>([]);
@@ -247,13 +312,17 @@ export function StockDocumentsV110Page({ type }: { type: StockType }) {
   const [targetPicker, setTargetPicker] = useState<{ index: number; itemId: string }>();
   const [inboundPicker, setInboundPicker] = useState<{ index: number; itemId: string }>();
   const [saving, setSaving] = useState(false);
+  const [batchOpen, setBatchOpen] = useState(false);
   const savingRef = useRef(false);
   const sourceScope = useMemo(() => ({ warehouseId: new URLSearchParams(route.search).get('warehouseId') || undefined, zoneId: new URLSearchParams(route.search).get('zoneId') || undefined, locationId: new URLSearchParams(route.search).get('locationId') || undefined }), [route.search]);
   const load = () => Promise.all([
-    api(`/stock-documents?documentType=${type}&pageSize=100`), api(`/items?pageSize=100&status=ACTIVE${meta.itemType ? `&itemType=${meta.itemType}` : ''}`),
+    api(`/stock-documents?documentType=${type}&pageSize=100`), api(`/items?page=1&pageSize=100&status=ACTIVE${meta.itemType ? `&itemType=${meta.itemType}` : ''}`),
     api('/warehouses'), api('/warehouse-locations?pageSize=100'), api('/batches?pageSize=100'),
-  ]).then(([docs, itemRows, warehouseRows, locationRows, batchRows]) => {
-    setRows(docs.items); setItems(itemRows.items); setWarehouses(warehouseRows);
+  ]).then(async ([docs, firstItems, warehouseRows, locationRows, batchRows]) => {
+    // 物料下拉必须取全量：单页上限 100，物料超过 100 条时编码靠后的会从下拉中消失
+    const pages = Math.ceil(Number(firstItems.total || 0) / 100);
+    const restItemPages = pages > 1 ? await Promise.all(Array.from({ length: pages - 1 }, (_, index) => api(`/items?page=${index + 2}&pageSize=100&status=ACTIVE${meta.itemType ? `&itemType=${meta.itemType}` : ''}`))) : [];
+    setRows(docs.items); setItems([...(firstItems.items || []), ...restItemPages.flatMap((page: any) => page.items || [])]); setWarehouses(warehouseRows);
     setLocations(locationRows.items.map(normalize)); setBatches(batchRows.items.map(normalize));
   }).catch(fail);
   useEffect(() => { void load(); }, [type]);
@@ -300,19 +369,18 @@ export function StockDocumentsV110Page({ type }: { type: StockType }) {
     if (changed) form.setFieldsValue({ lines: next, warehouseId: sourceWarehouseFromLines(next) });
   }, [open, outbound, moving, sourceDistributions, watchedLines?.map((line: any) => `${line?.itemId || ''}:${line?.locationId || ''}`).join('|')]);
   useEffect(() => {
-    if (!(inbound || outbound || moving)) return;
+    if (!moving) return;
     const lines = watchedLines || [];
     const requests = new Map<string, { warehouseId: string; itemId: string; purpose: string }>();
     for (const line of lines) {
-      if (inbound && watchedWarehouseId && line?.itemId) requests.set(`${watchedWarehouseId}:${line.itemId}:INBOUND`, { warehouseId: watchedWarehouseId, itemId: line.itemId, purpose: 'INBOUND' });
-      if (moving && line?.targetWarehouseId && line?.itemId) requests.set(`${line.targetWarehouseId}:${line.itemId}:MOVE_TARGET`, { warehouseId: line.targetWarehouseId, itemId: line.itemId, purpose: 'MOVE_TARGET' });
+      if (line?.targetWarehouseId && line?.itemId) requests.set(`${line.targetWarehouseId}:${line.itemId}:MOVE_TARGET`, { warehouseId: line.targetWarehouseId, itemId: line.itemId, purpose: 'MOVE_TARGET' });
     }
     let active = true;
     void Promise.all([...requests.entries()].map(async ([key, params]) => [key, await api(`/stock-documents/item-location-inventory?${new URLSearchParams(params)}`)] as const))
       .then(rows => { if (active) setInventoryByKey(current => ({ ...current, ...Object.fromEntries(rows) })); })
       .catch(fail);
     return () => { active = false; };
-  }, [inbound, moving, outbound, watchedLines, watchedWarehouseId]);
+  }, [moving, watchedLines]);
   const sourceWarehouseFromLines = (lines: any[]) => {
     const warehouseIds = [...new Set(lines.map(line => line?.sourceWarehouseId).filter(Boolean))];
     return warehouseIds.length === 1 ? warehouseIds[0] : undefined;
@@ -335,7 +403,7 @@ export function StockDocumentsV110Page({ type }: { type: StockType }) {
       warehouseId = sourceWarehouseIds[0];
       form.setFieldValue('warehouseId', warehouseId);
     }
-    const lines = currentLines.map(({ sourceKey, locationPath, locationDisplay: _locationDisplay, sourceLocationPath, sourceLocationDisplay: _sourceLocationDisplay, sourceWarehouseId: _sourceWarehouseId, sourceZoneId: _sourceZoneId, targetZoneId: _targetZoneId, targetLocationPath, targetLocationDisplay: _targetLocationDisplay, targetRemainingCapacityQty, warehouseId: _warehouseId, zoneId: _zoneId, ...line }: any) => adjustment
+    const lines = currentLines.map(({ sourceKey, locationPath, locationDisplay: _locationDisplay, sourceLocationPath, sourceLocationDisplay: _sourceLocationDisplay, sourceWarehouseId: _sourceWarehouseId, sourceZoneId: _sourceZoneId, targetZoneId: _targetZoneId, targetLocationPath, targetLocationDisplay: _targetLocationDisplay, targetRemainingCapacityQty, warehouseId: _warehouseId, zoneId: _zoneId, reviewStatus: _reviewStatus, reviewRemark: _reviewRemark, reviewChanges: _reviewChanges, reviewedAt: _reviewedAt, reviewedByName: _reviewedByName, ...line }: any) => adjustment
       ? { ...line, adjustmentQty: String(line.adjustmentQty) }
       : { ...line, quantity: String(line.quantity) });
     savingRef.current = true;
@@ -370,7 +438,7 @@ export function StockDocumentsV110Page({ type }: { type: StockType }) {
   const edit = async (record: any) => {
     try {
       const detail = await api(`/stock-documents/${record.id}`);
-      setEditing(detail); form.setFieldsValue({ warehouseId: detail.warehouseId, notes: detail.notes, lines: detail.lines.map((line: any) => { const sourceLocationDisplay = { locationDisplayName: line.locationDisplayName || line.locationCode, actualPosition: line.actualPosition }; const targetLocationDisplay = { locationDisplayName: line.targetLocationDisplayName || line.targetLocationCode, actualPosition: line.targetActualPosition }; return { itemId: line.itemId, locationId: line.locationId, locationPath: locationDisplayName(sourceLocationDisplay), locationDisplay: sourceLocationDisplay, batchId: line.batchId, batchNo: line.batchNo, sourceKey: `${line.locationId}:${line.batchId || ''}`, sourceWarehouseId: line.sourceWarehouseId || detail.warehouseId, sourceZoneId: line.sourceZoneId, sourceLocationPath: locationDisplayName(sourceLocationDisplay), sourceLocationDisplay, targetWarehouseId: line.targetWarehouseId, targetLocationId: line.targetLocationId, targetBatchId: line.targetBatchId, targetLocationPath: locationDisplayName(targetLocationDisplay), targetLocationDisplay, quantity: Number(line.quantity) }; }) }); setOpen(true);
+      setEditing(detail); form.setFieldsValue({ warehouseId: detail.warehouseId, notes: detail.notes, lines: detail.lines.map((line: any) => { const sourceLocationDisplay = { locationDisplayName: line.locationDisplayName || line.locationCode, actualPosition: line.actualPosition }; const targetLocationDisplay = { locationDisplayName: line.targetLocationDisplayName || line.targetLocationCode, actualPosition: line.targetActualPosition }; return { id: line.id, reviewStatus: line.reviewStatus, reviewRemark: line.reviewRemark, reviewChanges: line.reviewChanges, itemId: line.itemId, notes: line.notes, locationId: line.locationId, locationPath: locationDisplayName(sourceLocationDisplay), locationDisplay: sourceLocationDisplay, batchId: line.batchId, batchNo: line.batchNo, sourceKey: `${line.locationId}:${line.batchId || ''}`, sourceWarehouseId: line.sourceWarehouseId || detail.warehouseId, sourceZoneId: line.sourceZoneId, sourceLocationPath: locationDisplayName(sourceLocationDisplay), sourceLocationDisplay, targetWarehouseId: line.targetWarehouseId, targetLocationId: line.targetLocationId, targetBatchId: line.targetBatchId, targetLocationPath: locationDisplayName(targetLocationDisplay), targetLocationDisplay, quantity: Number(line.quantity) }; }) }); setOpen(true);
     } catch (error) { fail(error); }
   };
   useEffect(() => {
@@ -379,8 +447,8 @@ export function StockDocumentsV110Page({ type }: { type: StockType }) {
   }, [type]);
   const remove = async (id: string) => { try { await api(`/stock-documents/${id}`, { method: 'DELETE' }); message.success('单据已删除'); load(); } catch (error) { fail(error); } };
   return <PageScaffold title={meta.title} subtitle="草稿提交后进入一级审核；只有审核通过才会改变库存和生产累计。">
-    <div className="toolbar"><span /><Button type="primary" onClick={() => { const params = new URLSearchParams(window.location.search); const warehouseId = params.get('warehouseId') || undefined; const zoneId = params.get('zoneId') || undefined; const sourceLocation = locations.find(location => location.warehouseId === warehouseId && (!zoneId || location.zoneId === zoneId)); setEditing(undefined); setSourceDistributions({}); form.resetFields(); form.setFieldsValue(type === 'FINISHED_INBOUND' ? { lines: [{ quantity: 1 }], suggestedLocationId: sourceLocation?.id } : outbound || moving ? { lines: [{ quantity: 1 }] } : { warehouseId, lines: [{ locationId: sourceLocation?.id }] }); setOpen(true); }}>新建{meta.title}单</Button></div>
-    <Table rowKey="id" dataSource={rows} columns={[
+    <div className="toolbar"><span /><Space><Button type="primary" onClick={() => { const params = new URLSearchParams(window.location.search); const warehouseId = params.get('warehouseId') || undefined; const zoneId = params.get('zoneId') || undefined; const sourceLocation = locations.find(location => location.warehouseId === warehouseId && (!zoneId || location.zoneId === zoneId)); setEditing(undefined); setSourceDistributions({}); form.resetFields(); form.setFieldsValue(type === 'FINISHED_INBOUND' ? { lines: [{ quantity: 1 }], suggestedLocationId: sourceLocation?.id } : outbound || moving ? { lines: [{ quantity: 1 }] } : { warehouseId, lines: [{ locationId: sourceLocation?.id }] }); setOpen(true); }}>新建{meta.title}单</Button></Space></div>
+    <Table bordered rowKey="id" dataSource={rows} columns={[
       { title: '单号', dataIndex: 'documentNo' }, { title: '仓库', dataIndex: 'warehouseCode' }, { title: '状态', dataIndex: 'status', render: value => <StatusTag value={value} /> },
       { title: '创建时间', dataIndex: 'createdAt', render: formatBeijingTime },
       { title: '操作', render: (_, record) => <Space wrap>
@@ -391,9 +459,31 @@ export function StockDocumentsV110Page({ type }: { type: StockType }) {
         {['DRAFT', 'REJECTED'].includes(record.status) && <Popconfirm title="确认删除该草稿？" onConfirm={() => remove(record.id)}><Button danger type="link" icon={<DeleteOutlined />}>删除</Button></Popconfirm>}
       </Space> },
     ]} />
-    <Modal width={type === 'FINISHED_INBOUND' ? 1120 : 760} title={`${editing ? '编辑' : '新建'}${meta.title}单`} open={open} onCancel={() => setOpen(false)} onOk={() => form.submit()} confirmLoading={saving} destroyOnHidden footer={type === 'FINISHED_INBOUND' ? <Space><Button onClick={() => setOpen(false)}>取消</Button><Button loading={saving} onClick={() => form.validateFields().then(values => save(values, false)).catch(() => undefined)}>保存草稿</Button><Button type="primary" loading={saving} onClick={() => form.validateFields().then(values => save(values, true)).catch(() => undefined)}>保存并提交</Button></Space> : undefined}>
+    <Modal width={type === 'FINISHED_INBOUND' ? 1120 : type === 'MATERIAL_INBOUND' ? 1100 : 760} title={<div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, paddingRight: 28 }}><span>{`${editing ? '编辑' : '新建'}${meta.title}单`}</span>{inbound && !editing && <Button size="small" icon={<UploadOutlined />} onClick={() => setBatchOpen(true)}>Excel 批量导入</Button>}</div>} open={open} onCancel={() => setOpen(false)} onOk={() => form.submit()} confirmLoading={saving} destroyOnHidden footer={type === 'FINISHED_INBOUND' ? <Space><Button onClick={() => setOpen(false)}>取消</Button><Button loading={saving} onClick={() => form.validateFields().then(values => save(values, false)).catch(() => undefined)}>保存草稿</Button><Button type="primary" loading={saving} onClick={() => form.validateFields().then(values => save(values, true)).catch(() => undefined)}>保存并提交</Button></Space> : undefined}>
       <Form form={form} layout="vertical" onFinish={values => save(values, false)}>
-        {type === 'FINISHED_INBOUND' ? <FinishedInboundEditor form={form} items={items} suggestedLocationId={form.getFieldValue('suggestedLocationId')} /> : <>
+        {type === 'FINISHED_INBOUND' ? <FinishedInboundEditor form={form} items={items} suggestedLocationId={form.getFieldValue('suggestedLocationId')} /> : type === 'MATERIAL_INBOUND' ? <>
+        <Form.Item name="warehouseId" hidden><Input /></Form.Item>
+        {editing?.rejectionReason && <Alert type="warning" showIcon style={{ marginBottom: 8 }} message="本单曾被驳回" description={editing.rejectionReason} />}
+        {(watchedLines || []).some((line: any) => line?.reviewStatus === 'POSTED') && <Alert type="success" showIcon style={{ marginBottom: 8 }} message={`已有 ${(watchedLines || []).filter((line: any) => line?.reviewStatus === 'POSTED').length} 条明细审核通过并入库存（只读），其余明细修改后重新提交审核。`} />}
+        <Form.List name="lines">{(fields, { add, remove: removeLine }) => <>
+          <Table bordered size="small" rowKey="key" pagination={false} tableLayout="fixed" scroll={{ x: 1036, y: 430 }} dataSource={fields} columns={[
+            { title: '#', width: 46, render: (_: any, __: any, index: number) => index + 1 },
+            { title: '物料', width: 250, render: (_: any, field: any) => <InboundItemCell key={field.key} index={field.name} form={form} items={items} /> },
+            { title: '入库位置', width: 230, render: (_: any, field: any) => <InboundLocationCell key={field.key} index={field.name} form={form} locations={locations} onPick={() => {
+              const itemId = form.getFieldValue(['lines', field.name, 'itemId']);
+              if (!itemId) { message.warning('请先选择物料'); return; }
+              setInboundPicker({ index: field.name, itemId });
+            }} /> },
+            { title: '批次', width: 140, render: (_: any, field: any) => <InboundBatchCell key={field.key} index={field.name} form={form} batches={batches} /> },
+            { title: '数量', width: 100, render: (_: any, field: any) => <InboundQuantityCell key={field.key} index={field.name} form={form} /> },
+            { title: '备注', width: 140, render: (_: any, field: any) => <InboundNotesCell key={field.key} index={field.name} form={form} /> },
+            { title: '状态', width: 80, render: (_: any, field: any) => <InboundReviewCell key={field.key} index={field.name} form={form} /> },
+            { title: '', width: 50, render: (_: any, field: any) => fields.length > 1 && form.getFieldValue(['lines', field.name, 'reviewStatus']) !== 'POSTED' ? <Button danger type="link" size="small" icon={<DeleteOutlined />} onClick={() => removeDocumentLine(field.name, removeLine)} /> : null },
+          ]} />
+          <Button block type="dashed" icon={<PlusOutlined />} style={{ marginTop: 8 }} onClick={() => add()}>增加明细</Button>
+          <Typography.Text type="secondary" style={{ display: 'block', marginTop: 6 }}>共 {fields.length} 条明细；库位容量在选择库位时校验，保存时还会统一校验。</Typography.Text>
+        </>}</Form.List>
+        </> : <>
         {(outbound || moving) && <Form.Item name="warehouseId" hidden><Input /></Form.Item>}
         {!(outbound || moving) && (inbound ? <Form.Item name="warehouseId" hidden><Input /></Form.Item> : <Form.Item label="仓库" name="warehouseId" rules={[{ required: true }]}><Select options={warehouses.filter(w => !meta.itemType || w.warehouseType === (meta.itemType === 'MATERIAL' ? 'RAW' : 'FG')).map(w => ({ value: w.id, label: `${w.warehouseCode} ${w.name}` }))} onChange={() => { setInventoryByKey({}); form.setFieldValue('lines', (form.getFieldValue('lines') || []).map(() => ({}))); }} /></Form.Item>)}
         <Form.List name="lines">{(fields, { add, remove: removeLine }) => <>{fields.map(field => <Card size="small" key={field.key} style={{ marginBottom: 10 }}>
@@ -456,14 +546,14 @@ export function StockDocumentsV110Page({ type }: { type: StockType }) {
         <Form.Item label="备注" name="notes"><Input.TextArea /></Form.Item>
       </Form>
     </Modal>
-    <WarehouseLocationSelector open={!!targetPicker} mode="transfer-target" itemId={targetPicker?.itemId} context={{ warehouseId: targetPicker ? (form.getFieldValue(['lines', targetPicker.index, 'sourceWarehouseId']) || undefined) : undefined, locationId: targetPicker ? (form.getFieldValue(['lines', targetPicker.index, 'locationId']) || undefined) : undefined }} selectedLocationId={targetPicker ? form.getFieldValue(['lines', targetPicker.index, 'targetLocationId']) : undefined} onClose={() => setTargetPicker(undefined)} onConfirm={location => {
+    <WarehouseLocationSelector open={!!targetPicker} zIndex={1200} mode="transfer-target" itemId={targetPicker?.itemId} context={{ warehouseId: targetPicker ? (form.getFieldValue(['lines', targetPicker.index, 'sourceWarehouseId']) || undefined) : undefined, locationId: targetPicker ? (form.getFieldValue(['lines', targetPicker.index, 'locationId']) || undefined) : undefined }} selectedLocationId={targetPicker ? form.getFieldValue(['lines', targetPicker.index, 'targetLocationId']) : undefined} onClose={() => setTargetPicker(undefined)} onConfirm={location => {
       if (!targetPicker) return;
       const next = [...(form.getFieldValue('lines') || [])]; const line = next[targetPicker.index] || {};
       if (line.locationId === location.locationId) { message.error('目标库位不能与源库位相同'); return; }
       next[targetPicker.index] = { ...line, targetWarehouseId: location.warehouseId, targetZoneId: location.zoneId, targetLocationId: location.locationId, targetRemainingCapacityQty: location.remainingCapacityQty, targetLocationPath: locationDisplayName(location), targetLocationDisplay: location };
       form.setFieldValue('lines', next); setTargetPicker(undefined);
     }} />
-    <WarehouseLocationSelector open={!!inboundPicker} mode="inbound" itemId={inboundPicker?.itemId} context={sourceScope} queryScope={{ warehouseId: form.getFieldValue('warehouseId') || undefined }} selectedLocationId={inboundPicker ? form.getFieldValue(['lines', inboundPicker.index, 'locationId']) : undefined} onClose={() => setInboundPicker(undefined)} onConfirm={location => {
+    <WarehouseLocationSelector open={!!inboundPicker} zIndex={1200} mode="inbound" itemId={inboundPicker?.itemId} context={sourceScope} queryScope={{ warehouseId: form.getFieldValue('warehouseId') || undefined }} selectedLocationId={inboundPicker ? form.getFieldValue(['lines', inboundPicker.index, 'locationId']) : undefined} onClose={() => setInboundPicker(undefined)} onConfirm={location => {
       if (!inboundPicker) return;
       const next = [...(form.getFieldValue('lines') || [])]; const line = next[inboundPicker.index] || {};
       const otherWarehouseId = next.find((row: any, index: number) => index !== inboundPicker.index && row?.locationId && row?.warehouseId)?.warehouseId;
@@ -471,7 +561,112 @@ export function StockDocumentsV110Page({ type }: { type: StockType }) {
       next[inboundPicker.index] = { ...line, warehouseId: location.warehouseId, zoneId: location.zoneId, locationId: location.locationId, locationPath: locationDisplayName(location), locationDisplay: location };
       form.setFieldsValue({ lines: next, warehouseId: location.warehouseId }); setInboundPicker(undefined);
     }} />
+    {inbound && <BatchInboundModal open={batchOpen} kind={batchKind} onClose={() => setBatchOpen(false)} onCreated={(doc) => { void load(); if (doc) { setOpen(false); void edit({ id: doc.id }); } }} />}
   </PageScaffold>;
+}
+
+type BatchFailure = { row: number; itemCode: string; itemName: string; warehouse: string; message: string; raw: Record<string, string> };
+type BatchWarning = { rows: string; itemCode: string; message: string };
+type BatchDocument = { id: string; documentNo: string; warehouseCode: string; warehouseName: string; lineCount: number };
+type BatchResult = { totalCount: number; successCount: number; failureCount: number; warningCount: number; documents: BatchDocument[]; failures: BatchFailure[]; warnings: BatchWarning[] };
+type BatchInboundKind = 'material-inbound' | 'finished-inbound';
+/** 原材料与成品批量入库模板列完全一致，只有标题、模板文件名和填写示例不同 */
+const batchInboundLabels: Record<BatchInboundKind, { label: string; warehouseSample: string }> = {
+  'material-inbound': { label: '原材料', warehouseSample: '原材料库-固安' },
+  'finished-inbound': { label: '成品', warehouseSample: 'DEMO 成品一仓' },
+};
+
+function BatchInboundModal({ open, kind, onClose, onCreated }: { open: boolean; kind: BatchInboundKind; onClose: () => void; onCreated: (doc?: BatchDocument) => void }) {
+  const [uploading, setUploading] = useState(false);
+  const [result, setResult] = useState<BatchResult | null>(null);
+  const { label, warehouseSample } = batchInboundLabels[kind];
+
+  const downloadTemplate = async () => {
+    try {
+      const response = await fetch(`${API_BASE}/stock-documents/${kind}/batch-template`, { headers: { Authorization: `Bearer ${token()}` } });
+      if (!response.ok) throw new Error('模板下载失败');
+      const url = URL.createObjectURL(await response.blob());
+      const anchor = document.createElement('a');
+      anchor.href = url; anchor.download = `${label}批量入库模板.xlsx`; anchor.click();
+      URL.revokeObjectURL(url);
+    } catch (error) { fail(error); }
+  };
+
+  const upload = async (file: File) => {
+    setUploading(true);
+    try {
+      const form = new FormData();
+      form.append('file', file, file.name);
+      const data: BatchResult = await api(`/stock-documents/${kind}/batch-import`, { method: 'POST', body: form });
+      setResult(data);
+      if (data.documents.length) onCreated();
+      if (data.successCount === 0) message.warning('全部行校验失败，未生成草稿单');
+      else if (data.failureCount > 0) message.warning(`成功 ${data.successCount} 行，失败 ${data.failureCount} 行`);
+      else message.success(`已生成 ${data.documents.length} 张草稿入库单`);
+    } catch (error) { fail(error); } finally { setUploading(false); }
+    return false;
+  };
+
+  const exportFailures = () => {
+    if (!result?.failures.length) return;
+    const headers = ['物料编码', '类别', '产品名称', '规格', '数量', '单位', '所属仓库', '库区', '库位', '备注', '失败原因'];
+    const keys = ['itemCode', 'category', 'name', 'spec', 'quantity', 'unit', 'warehouse', 'zone', 'location', 'notes'];
+    const escapeCsv = (value: unknown) => {
+      const text = value === null || value === undefined ? '' : String(value);
+      return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+    };
+    const lines = [
+      headers.join(','),
+      ...result.failures.map(item => [...keys.map(key => escapeCsv(item.raw?.[key])), escapeCsv(item.message)].join(',')),
+    ];
+    const blob = new Blob(['\uFEFF' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url; anchor.download = `批量入库失败明细-${new Date().toISOString().slice(0, 10)}.csv`; anchor.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const alertType: 'success' | 'warning' | 'error' = !result || result.successCount === 0 ? 'error' : result.failureCount > 0 ? 'warning' : 'success';
+
+  return <Modal title={`${label}批量入库`} open={open} width={780} zIndex={1300} onCancel={onClose} destroyOnHidden
+    footer={result
+      ? <Space><Button onClick={() => setResult(null)}>继续导入</Button><Button type="primary" onClick={onClose}>关闭</Button></Space>
+      : <Button onClick={onClose}>关闭</Button>}
+    afterOpenChange={(visible) => { if (!visible) setResult(null); }}>
+    {!result ? <>
+      <Typography.Paragraph type="secondary" style={{ marginBottom: 12 }}>
+{/*         按模板填写后上传 .xlsx 文件，系统逐行校验：校验通过的行按所属仓库生成草稿入库单（每个仓库一张）；校验失败的行返回明细，不影响其他行。草稿单仍需提交并经审核通过后才会增加库存。
+        <br />填写规则：所属仓库填仓库名称或编码（如 {warehouseSample}）；库区填名称或编码（如 备货区A）；库位可填编号末段（如 01）或完整编码（如 AA-备货区A-01）。 */}
+      </Typography.Paragraph>
+      <Space style={{ marginBottom: 12 }}><Button icon={<DownloadOutlined />} onClick={downloadTemplate}>下载 Excel 模板</Button></Space>
+      <Upload.Dragger accept=".xlsx" maxCount={1} showUploadList={false} disabled={uploading} beforeUpload={upload}>
+        <p style={{ fontSize: 28, margin: '8px 0' }}><InboxOutlined /></p>
+        <p>{uploading ? '正在校验并创建草稿单……' : '点击或拖拽 .xlsx 文件到此处上传'}</p>
+      </Upload.Dragger>
+    </> : <>
+      <Alert showIcon type={alertType} style={{ marginBottom: 12 }}
+        message={`共 ${result.totalCount} 行：成功 ${result.successCount} 行，失败 ${result.failureCount} 行，生成 ${result.documents.length} 张草稿入库单`} />
+      {result.documents.length > 0 && <Card size="small" title="已生成草稿单" style={{ marginBottom: 12 }}>
+        {result.documents.map(doc => <div key={doc.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span>{doc.documentNo}｜{doc.warehouseCode} {doc.warehouseName}｜{doc.lineCount} 行明细</span>
+          <Button type="link" onClick={() => { onCreated(doc); onClose(); }}>查看单据</Button>
+        </div>)}
+      </Card>}
+      {result.warnings.length > 0 && <Alert showIcon type="warning" style={{ marginBottom: 12 }}
+        message={`${result.warnings.length} 条合并提示`}
+        description={<ul style={{ margin: 0, paddingLeft: 18 }}>{result.warnings.map((warning, index) => <li key={index}>第 {warning.rows} 行（{warning.itemCode}）：{warning.message}</li>)}</ul>} />}
+      {result.failures.length > 0 && <>
+        <Space style={{ marginBottom: 8 }}><Button icon={<DownloadOutlined />} onClick={exportFailures}>导出失败明细（CSV，可修改后重新上传）</Button></Space>
+        <Table size="small" rowKey="row" pagination={{ pageSize: 8 }} dataSource={result.failures} columns={[
+          { title: '行号', dataIndex: 'row', width: 56 },
+          { title: '物料编码', dataIndex: 'itemCode', width: 110 },
+          { title: '产品名称', dataIndex: 'itemName', width: 150 },
+          { title: '所属仓库', dataIndex: 'warehouse', width: 130 },
+          { title: '失败原因', dataIndex: 'message' },
+        ]} />
+      </>}
+    </>}
+  </Modal>;
 }
 
 export function InventoryV110Page() {

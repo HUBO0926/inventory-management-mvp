@@ -122,6 +122,10 @@ export class ApprovalsService {
     if(!await this.completedRetry(user.id,key,'POST:/approvals/:id/approve'))await this.requireAction(id,user,'approve');
     return this.stock.approve(id,dto,key,user.id,{...context,idempotencyKey:key});
   }
+  async approveLines(id:string,dto:any,key:string|undefined,user:AuthUser, context:any={}) {
+    if(!await this.completedRetry(user.id,key,'POST:/approvals/:id/approve-lines'))await this.requireAction(id,user,'approve');
+    return this.stock.approveLines(id,dto,key,user.id,{...context,idempotencyKey:key});
+  }
   async reject(id:string,dto:any,key:string|undefined,user:AuthUser, context:any={}) {
     if(!await this.completedRetry(user.id,key,'POST:/approvals/:id/reject'))await this.requireAction(id,user,'reject');
     return this.stock.reject(id,dto.reason,user.id,{...context,idempotencyKey:key,reasonCode:dto.reasonCode});

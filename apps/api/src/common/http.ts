@@ -7,6 +7,7 @@ import {
   HttpException,
   HttpStatus,
   Injectable,
+  Logger,
   NestInterceptor,
 } from '@nestjs/common';
 import { randomUUID } from 'crypto';
@@ -26,6 +27,8 @@ export class ResponseInterceptor implements NestInterceptor {
 
 @Catch()
 export class ApiExceptionFilter implements ExceptionFilter {
+  private readonly logger = new Logger('ApiExceptionFilter');
+
   catch(exception: unknown, host: ArgumentsHost) {
     const ctx = host.switchToHttp();
     const response = ctx.getResponse();
@@ -45,9 +48,12 @@ export class ApiExceptionFilter implements ExceptionFilter {
         message = Array.isArray(body.message) ? body.message.join('; ') : body.message || exception.message;
         details = body.details;
       }
+    } else {
+      // 非 HttpException（多为数据库/运行时异常）：把原始原因带出来，否则前端只能看到"服务器内部错误"，排查必须翻终端
+      if (exception instanceof Error && exception.message) message = exception.message;
+      this.logger.error(`[${requestId}] ${request.method} ${request.originalUrl} -> ${message}`, exception instanceof Error ? exception.stack : undefined);
     }
 
-    if(status===HttpStatus.INTERNAL_SERVER_ERROR)message='服务器内部错误';
     response.status(status).json({ success:false,code, message, data:null,details:details??null, requestId });
   }
 }
