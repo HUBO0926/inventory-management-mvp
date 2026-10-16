@@ -10,7 +10,7 @@ GitHub 合并 CI `38832704229` 中编译、API 测试、镜像、秘密扫描、
 
 本地修复版本最新验证结果：`pnpm lint`、`pnpm test`、`pnpm build` 全部通过；隔离 PostgreSQL API E2E **15/15 通过**；桌面和移动浏览器套件 **19 项通过、15 项按测试配置跳过**。原失败的完整建单、明细分配审批和库存刷新浏览器流程通过。Docker 镜像构建因 Docker Hub 拉取 Node 基础镜像时网络超时未完成；用本机 Node、独立本地 PostgreSQL 完成同一前后端浏览器验收。
 
-PR #6 提交 `8487af8e` 的 GitHub Actions run `38849498885` 已完成：验证/API E2E/升级迁移、容器构建和浏览器工作流通过；Gitleaks 密钥扫描失败，结果 artifact 为 `gitleaks-results.sarif`，命中尚待逐项审阅和处置。当前 PR 保持草稿，不得合并或发布，直到确认并处理扫描结果。
+PR #6 功能提交 `2766aad3` 的 GitHub Actions run `38851093551` 已完成，验证/API E2E/升级迁移、容器构建、浏览器工作流和 Gitleaks 扫描全部通过。早期提交中的两个固定测试幂等键触发了 `generic-api-key` 误报；缩短测试标识并压缩本分支历史后，扫描通过。PR 仍保持草稿，因为下述单据冲销缺陷与生产前检查尚未解决。
 
 ## 本次代码准备
 
