@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { readFile } from 'node:fs/promises';
 
 const password = process.env.INITIAL_DEMO_PASSWORD || 'Demo@123456';
 
@@ -41,6 +42,45 @@ test('生产人员不显示仓库管理入口且接口边界由服务端拒绝',
     return response.status;
   });
   expect(status).toBe(403);
+});
+
+test('原材料批量导入展示逐行错误并可下载模板和失败明细', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop-chromium');
+  await login(page, 'warehouse');
+  await page.goto('/inventory/warehouse-management?warehouse=TEST-FUNC-RAW-A');
+  await page.getByRole('button', { name: '入库' }).first().click();
+  const inbound = page.getByRole('dialog', { name: '新建原材料入库单' });
+  await inbound.getByRole('button', { name: 'Excel 批量导入' }).click();
+  const batch = page.getByRole('dialog', { name: '原材料批量入库' });
+  await expect(batch).toBeVisible();
+
+  const templateDownload = page.waitForEvent('download');
+  await batch.getByRole('button', { name: '下载 Excel 模板' }).click();
+  expect((await templateDownload).suggestedFilename()).toBe('原材料批量入库模板.xlsx');
+
+  await page.route('**/api/stock-documents/material-inbound/batch-import', route => route.fulfill({
+    status: 201,
+    contentType: 'application/json',
+    body: JSON.stringify({ data: {
+      totalCount: 2, successCount: 1, failureCount: 1, warningCount: 0,
+      documents: [{ id: 'fixture-document', documentNo: 'RK-FIXTURE', warehouseCode: 'RAW', warehouseName: '原材料库', lineCount: 1 }],
+      failures: [{ row: 3, itemCode: 'TEST-ITEM', itemName: '测试物料', warehouse: 'RAW', message: '数量必须是大于 0 的整数', raw: { itemCode: 'TEST-ITEM', category: '测试', name: '测试物料', spec: '', quantity: '0', unit: '个', warehouse: 'RAW', zone: '主库区', location: '01', notes: '' } }],
+      warnings: [],
+    } }),
+  }));
+  await batch.locator('input[type="file"]').setInputFiles({
+    name: 'batch.xlsx', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', buffer: Buffer.from('fixture'),
+  });
+  await expect(batch.getByText('共 2 行：成功 1 行，失败 1 行，生成 1 张草稿入库单')).toBeVisible();
+  await expect(batch.getByText('数量必须是大于 0 的整数')).toBeVisible();
+
+  const failuresDownload = page.waitForEvent('download');
+  await batch.getByRole('button', { name: '导出失败明细（CSV，可修改后重新上传）' }).click();
+  const download = await failuresDownload;
+  expect(download.suggestedFilename()).toMatch(/^批量入库失败明细-\d{4}-\d{2}-\d{2}\.csv$/);
+  const csv = await readFile(await download.path(), 'utf8');
+  expect(csv).toContain('TEST-ITEM');
+  expect(csv).toContain('数量必须是大于 0 的整数');
 });
 
 test('仓库、库区、库位和物料上下文均能传入入库单', async ({ page }, testInfo) => {

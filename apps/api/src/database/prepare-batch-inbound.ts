@@ -2,9 +2,7 @@ import 'reflect-metadata';
 import { createDataSource } from './data-source';
 
 /** Online, repeatable preparation for migration 199. Run before the compatibility app rollout. */
-async function run() {
-  const db = createDataSource();
-  await db.initialize();
+export async function prepareBatchInbound(db: ReturnType<typeof createDataSource>, backfillLegacy = false) {
   const qr = db.createQueryRunner();
   try {
     await qr.connect();
@@ -41,13 +39,12 @@ async function run() {
     if (index && !index.indisvalid) await db.query(`DROP INDEX CONCURRENTLY ix_stock_document_lines_review`);
     if (!index || !index.indisvalid) await db.query(`CREATE INDEX CONCURRENTLY ix_stock_document_lines_review ON stock_document_lines(document_id, review_status)`);
 
-    if (process.argv.includes('--backfill-legacy')) await backfillPostedMaterialLines(db);
+    if (backfillLegacy) await backfillPostedMaterialLines(db);
   } catch (error) {
     if (qr.isTransactionActive) await qr.rollbackTransaction();
     throw error;
   } finally {
     await qr.release();
-    await db.destroy();
   }
 }
 
@@ -70,4 +67,16 @@ async function backfillPostedMaterialLines(db: ReturnType<typeof createDataSourc
   } while (changed > 0);
 }
 
-run().catch(error => { console.error('Online batch-inbound schema preparation failed:', error instanceof Error ? error.message : 'unknown error'); process.exitCode = 1; });
+async function run() {
+  const db = createDataSource();
+  await db.initialize();
+  try {
+    await prepareBatchInbound(db, process.argv.includes('--backfill-legacy'));
+  } finally {
+    await db.destroy();
+  }
+}
+
+if (require.main === module) {
+  run().catch(error => { console.error('Online batch-inbound schema preparation failed:', error instanceof Error ? error.message : 'unknown error'); process.exitCode = 1; });
+}

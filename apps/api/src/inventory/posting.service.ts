@@ -104,7 +104,18 @@ export class InventoryPostingService {
         postedLines.push(await this.postLine(qr, documentId, userId, line, line.target_warehouse_id, line.target_location_id, line.target_batch_id || line.batch_id, Direction.IN, doc.document_type));
       }
     } else if (doc.document_type === DocumentType.REVERSAL) {
-      for (const line of lines) postedLines.push(await this.postLine(qr, documentId, userId, line, line.target_warehouse_id || doc.warehouse_id, line.location_id, line.batch_id, line.direction, doc.document_type));
+      if (!doc.original_document_id) throw new BusinessException('VALIDATION_ERROR', '冲销单据缺少原始单据');
+      const sourceTransactions = await qr.query(`SELECT t.warehouse_id,t.location_id,t.item_id,t.batch_id,
+        abs(t.delta_qty)::text quantity,CASE WHEN t.delta_qty>0 THEN 'OUT' ELSE 'IN' END direction,
+        i.item_code,i.name item_name
+        FROM stock_transactions t JOIN items i ON i.id=t.item_id
+        WHERE t.source_document_id=$1
+        ORDER BY t.warehouse_id,t.location_id,t.item_id,t.batch_id NULLS FIRST,t.created_at,t.id`, [doc.original_document_id]);
+      if (!sourceTransactions.length) throw new BusinessException('INVALID_STATUS', '原始单据没有可冲销的库存流水');
+      for (const transaction of sourceTransactions) {
+        postedLines.push(await this.postLine(qr, documentId, userId, transaction, transaction.warehouse_id,
+          transaction.location_id, transaction.batch_id, transaction.direction, doc.document_type));
+      }
     } else {
       const allocations = [DocumentType.MATERIAL_INBOUND, DocumentType.FINISHED_INBOUND, DocumentType.PRODUCTION_RETURN, DocumentType.PRODUCTION_COMPLETION].includes(doc.document_type) ? await qr.query(`SELECT a.*,l.item_id FROM stock_document_receipt_allocations a JOIN stock_document_lines l ON l.id=a.document_line_id WHERE l.document_id=$1 ${lineFilter} ORDER BY a.warehouse_id,a.location_id,a.id`, partial ? [documentId, options.lineIds] : [documentId]) : [];
       if (allocations.length) {

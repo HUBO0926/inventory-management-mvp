@@ -949,7 +949,13 @@ export class StockDocumentsService {
       if (!original) throw new BusinessException('NOT_FOUND', '库存单据不存在');
       await this.assertDocumentOperation(qr, id, user, original.warehouse_id);
       if (original.status !== 'POSTED' || original.document_type === DocumentType.REVERSAL) throw new BusinessException('INVALID_STATUS', '只有已过账的非冲销单据可以冲销');
-      const transactions = await qr.query(`SELECT t.warehouse_id,t.location_id,t.item_id,t.batch_id,abs(t.delta_qty)::text quantity,CASE WHEN t.delta_qty>0 THEN 'OUT' ELSE 'IN' END direction FROM stock_transactions t WHERE t.source_document_id=$1 ORDER BY t.warehouse_id,t.location_id,t.item_id`, [id]);
+      const transactions = await qr.query(`SELECT t.item_id,
+        sum(abs(t.delta_qty))::text quantity,
+        (array_agg(t.warehouse_id ORDER BY t.warehouse_id,t.location_id,t.batch_id))[1] warehouse_id,
+        (array_agg(t.location_id ORDER BY t.warehouse_id,t.location_id,t.batch_id))[1] location_id,
+        (array_agg(t.batch_id ORDER BY t.warehouse_id,t.location_id,t.batch_id))[1] batch_id,
+        (array_agg(CASE WHEN t.delta_qty>0 THEN 'OUT' ELSE 'IN' END ORDER BY t.warehouse_id,t.location_id,t.batch_id))[1] direction
+        FROM stock_transactions t WHERE t.source_document_id=$1 GROUP BY t.item_id ORDER BY t.item_id`, [id]);
       if (original.document_type === DocumentType.STOCK_CHECK && !transactions.length) {
         await qr.query(`UPDATE stock_documents SET status='VOIDED',voided_by=$1,voided_by_user_id=$1,voided_by_username=(SELECT username FROM users WHERE id=$1),voided_by_name=(SELECT COALESCE(employee_name,name) FROM users WHERE id=$1),voided_at=now(),updated_at=now() WHERE id=$2`,[userId,id]);
         await this.audit.log(userId,'VOID_ZERO_DIFFERENCE_STOCK_CHECK','stock_documents',id,{reason},qr.manager);
