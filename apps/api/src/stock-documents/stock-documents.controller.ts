@@ -57,15 +57,15 @@ export class StockDocumentsController{
   @Permissions('stock.view') @Get('finished-inbound/batch-template') async finishedInboundBatchTemplate(@Res()response:any){const buffer=await this.service.batchInboundTemplate('finished-inbound');response.setHeader('Content-Type','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');response.setHeader('Content-Disposition',`attachment; filename*=UTF-8''${encodeURIComponent('成品批量入库模板.xlsx')}`);response.send(buffer);}
   @Permissions('stock.view') @Get(':id') get(@Param('id')id:string,@CurrentUser()u:AuthUser){return this.service.get(id,u);}
   @Permissions('stock.create') @Post('material-inbound') inbound(@Body()dto:StockDocumentDto,@CurrentUser()u:AuthUser){return this.service.create(DocumentType.MATERIAL_INBOUND,dto,u);}
-  @Permissions('stock.create') @Post('material-inbound/batch-import') @UseInterceptors(FileInterceptor('file',{storage:memoryStorage(),limits:{fileSize:10*1024*1024,files:1}})) materialInboundBatchImport(@UploadedFile()file:Express.Multer.File|undefined,@CurrentUser()u:AuthUser){
+  @Permissions('stock.create') @Post('material-inbound/batch-import') @UseInterceptors(FileInterceptor('file',{storage:memoryStorage(),limits:{fileSize:10*1024*1024,files:1}})) materialInboundBatchImport(@UploadedFile()file:Express.Multer.File|undefined,@CurrentUser()u:AuthUser,@Headers('idempotency-key')key?:string){
     // multer 默认按 latin1 解析文件名，中文会乱码，入口处转回 UTF-8
     if (file?.originalname) file.originalname = Buffer.from(file.originalname, 'latin1').toString('utf8');
-    return this.service.batchImportInbound('material-inbound',file,u);
+    return this.service.batchImportInbound('material-inbound',file,u,key);
   }
-  @Permissions('stock.create') @Post('finished-inbound/batch-import') @UseInterceptors(FileInterceptor('file',{storage:memoryStorage(),limits:{fileSize:10*1024*1024,files:1}})) finishedInboundBatchImport(@UploadedFile()file:Express.Multer.File|undefined,@CurrentUser()u:AuthUser){
+  @Permissions('stock.create') @Post('finished-inbound/batch-import') @UseInterceptors(FileInterceptor('file',{storage:memoryStorage(),limits:{fileSize:10*1024*1024,files:1}})) finishedInboundBatchImport(@UploadedFile()file:Express.Multer.File|undefined,@CurrentUser()u:AuthUser,@Headers('idempotency-key')key?:string){
     // multer 默认按 latin1 解析文件名，中文会乱码，入口处转回 UTF-8
     if (file?.originalname) file.originalname = Buffer.from(file.originalname, 'latin1').toString('utf8');
-    return this.service.batchImportInbound('finished-inbound',file,u);
+    return this.service.batchImportInbound('finished-inbound',file,u,key);
   }
   @Permissions('stock.create') @Post('finished-inbound') finishedInbound(@Body()dto:StockDocumentDto,@CurrentUser()u:AuthUser){return this.service.create(DocumentType.FINISHED_INBOUND,dto,u);}
   @Permissions('stock.create') @Post('finished-outbound') outbound(@Body()dto:StockDocumentDto,@CurrentUser()u:AuthUser){return this.service.create(DocumentType.FINISHED_OUTBOUND,dto,u);}

@@ -1,0 +1,61 @@
+services:
+  api-candidate:
+    image: ${API_IMAGE:?Set API_IMAGE to an immutable ghcr.io image digest}
+    command: ["node", "dist/main.js"]
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      APP_ENV: production
+      POSTGRES_HOST: ${POSTGRES_HOST:?Set the existing PostgreSQL service name}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_DB: ${POSTGRES_DB:?Set the inventory database name}
+      POSTGRES_USER: ${POSTGRES_USER:?Set the existing API database user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Load the existing API database password from the protected server env file}
+      JWT_SECRET: ${JWT_SECRET:?Load the existing JWT secret from the protected server env file}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-8h}
+      API_PORT: 3001
+      UPLOAD_ROOT: /app/uploads
+      BATCH_INBOUND_ENABLED: ${BATCH_INBOUND_ENABLED:-false}
+    volumes:
+      - inventory_uploads:/app/uploads
+    networks:
+      inventory:
+        aliases: [inventory-api-candidate]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
+
+  web-candidate:
+    image: ${WEB_IMAGE:?Set WEB_IMAGE to an immutable ghcr.io image digest}
+    restart: unless-stopped
+    environment:
+      API_PROXY_TARGET: http://inventory-api-candidate:3001
+    ports:
+      - "127.0.0.1:${CANDIDATE_WEB_PORT:-18081}:80"
+    networks:
+      - inventory
+    depends_on:
+      api-candidate:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 256M
+
+networks:
+  inventory:
+    external: true
+    name: ${INVENTORY_DOCKER_NETWORK:?Set the existing inventory network after server inspection}
+
+volumes:
+  inventory_uploads:
+    external: true
+    name: ${INVENTORY_UPLOAD_VOLUME:?Set the existing uploads volume after server inspection}

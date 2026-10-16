@@ -21,4 +21,4 @@ COPY --from=build /app/apps/api/package.json ./apps/api/package.json
 COPY --from=build /app/apps/api/node_modules ./apps/api/node_modules
 COPY --from=build /app/apps/api/dist ./apps/api/dist
 WORKDIR /app/apps/api
-CMD ["sh", "-c", "node dist/database/run-migrations.js && node dist/database/seed.js && node dist/main.js"]
+CMD ["node", "dist/main.js"]

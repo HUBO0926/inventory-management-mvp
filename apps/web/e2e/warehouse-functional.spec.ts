@@ -113,7 +113,7 @@ test('仓管可从库位弹窗提交入库，审批过账后页面刷新库存�
   await picker.getByRole('button', { name: '确认选择' }).click();
   await dialog.getByLabel('入库数量').fill('1');
   const marker = `TEST-RUN-UI-${Date.now()}`;
-  await dialog.getByLabel('备注').fill(marker);
+  await dialog.getByLabel('备注', { exact: true }).fill(marker);
   const created = page.waitForResponse(response => response.url().includes('/stock-documents/material-inbound') && response.request().method() === 'POST');
   await dialog.locator('.ant-modal-footer .ant-btn-primary').click();
   const document = (await (await created).json()).data;
@@ -127,19 +127,22 @@ test('仓管可从库位弹窗提交入库，审批过账后页面刷新库存�
   expect(loginResponse.ok()).toBe(true);
   const { data: { accessToken } } = await loginResponse.json();
   const headers = { Authorization: `Bearer ${accessToken}` };
-  const detailResponse = await request.get(`/api/stock-documents/${document.id}`, { headers });
-  expect(detailResponse.ok()).toBe(true);
-  const { data: detail } = await detailResponse.json();
-  const receiptAllocations = detail.lines.map((line: any) => ({
-    documentLineId: line.id, disposition: 'NORMAL', warehouseId: detail.warehouseId,
-    locationId: line.locationId, batchId: line.batchId, quantity: line.quantity,
-  }));
-  const approval = await request.post(`/api/approvals/${document.id}/approve`, {
-    headers: { ...headers, 'Idempotency-Key': `${marker}-approve` }, data: { receiptAllocations },
-  });
-  expect(approval.ok()).toBe(true);
-  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
-  await expect(page.getByText(document.documentNo, { exact: false })).toBeVisible();
+  await page.evaluate((token: string) => localStorage.setItem('inventory_token', token), accessToken);
+  await page.goto('/approvals');
+  await expect(page.getByRole('heading', { name: '审核中心' })).toBeVisible();
+  await page.getByRole('button', { name: document.documentNo }).click();
+  const drawer = page.getByRole('dialog', { name: new RegExp(document.documentNo) });
+  await expect(drawer).toBeVisible();
+  await drawer.getByRole('button', { name: /仅通过勾选明细 \(1\)/ }).click();
+  const allocation = page.getByRole('dialog', { name: '入库审核分配' });
+  await expect(allocation).toBeVisible();
+  await allocation.getByRole('button', { name: '审核通过并过账' }).click();
+  await expect(page.getByText('全部明细已审核通过并入库存')).toBeVisible();
+  const final = await request.get(`/api/stock-documents/${document.id}`, { headers });
+  expect(final.ok()).toBe(true);
+  const { data: finalDocument } = await final.json();
+  expect(finalDocument.status).toBe('POSTED');
+  expect(finalDocument.lines[0].reviewStatus).toBe('POSTED');
 });
 
 test('本地桌面基线按层级懒加载且移动视口不出现页面级横向滚动', async ({ page }, testInfo) => {

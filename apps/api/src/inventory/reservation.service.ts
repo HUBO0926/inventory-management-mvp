@@ -64,9 +64,10 @@ export class StockReservationService {
         FROM stock_document_lines l WHERE l.document_id=$1 AND l.target_warehouse_id IS NOT NULL AND l.target_location_id IS NOT NULL`, [documentId]);
     } else if (receiptTypes.includes(document.document_type)) {
       const allocations = await qr.query(`SELECT a.document_line_id "lineId",a.id "allocationId",a.warehouse_id "warehouseId",a.location_id "locationId",l.item_id "itemId",a.quantity
-        FROM stock_document_receipt_allocations a JOIN stock_document_lines l ON l.id=a.document_line_id WHERE l.document_id=$1`, [documentId]);
-      targets = allocations.length ? allocations : await qr.query(`SELECT l.id "lineId",NULL::uuid "allocationId",COALESCE(l.target_warehouse_id,l.source_warehouse_id,d.warehouse_id) "warehouseId",COALESCE(l.target_location_id,l.location_id) "locationId",l.item_id "itemId",l.quantity
-        FROM stock_document_lines l JOIN stock_documents d ON d.id=l.document_id WHERE l.document_id=$1 AND l.direction='IN' AND l.review_status='PENDING'`, [documentId]);
+        FROM stock_document_receipt_allocations a JOIN stock_document_lines l ON l.id=a.document_line_id WHERE l.document_id=$1 AND l.review_status='PENDING'`, [documentId]);
+      const unallocated = await qr.query(`SELECT l.id "lineId",NULL::uuid "allocationId",COALESCE(l.target_warehouse_id,l.source_warehouse_id,d.warehouse_id) "warehouseId",COALESCE(l.target_location_id,l.location_id) "locationId",l.item_id "itemId",l.quantity
+        FROM stock_document_lines l JOIN stock_documents d ON d.id=l.document_id WHERE l.document_id=$1 AND l.direction='IN' AND l.review_status='PENDING' AND NOT EXISTS (SELECT 1 FROM stock_document_receipt_allocations a WHERE a.document_line_id=l.id)`, [documentId]);
+      targets = [...allocations, ...unallocated];
     }
     const grouped = new Map<string, any>();
     for (const target of targets) {

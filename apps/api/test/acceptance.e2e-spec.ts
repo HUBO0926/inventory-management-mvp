@@ -8,6 +8,7 @@ import { promises as fs } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import sharp from 'sharp';
+import { Workbook } from 'exceljs';
 
 describe('库存管理固定验收场景',()=>{
   let app:INestApplication,db:DataSource,adminDb:DataSource|undefined;let admin='',warehouse='',production='';const ids:any={};
@@ -90,6 +91,97 @@ describe('库存管理固定验收场景',()=>{
     await request(app.getHttpServer()).get('/api/dashboard/cockpit?days=15').set(auth(admin)).expect(400);
     const mismatch=await db.query(`SELECT w.warehouse_code,i.item_code,b.on_hand_qty,COALESCE(sum(t.delta_qty),0) tx_qty FROM stock_balances b JOIN warehouses w ON w.id=b.warehouse_id JOIN items i ON i.id=b.item_id LEFT JOIN stock_transactions t ON t.warehouse_id=b.warehouse_id AND t.item_id=b.item_id GROUP BY w.warehouse_code,i.item_code,b.on_hand_qty HAVING b.on_hand_qty<>COALESCE(sum(t.delta_qty),0)`);expect(mismatch).toEqual([]);
     await request(app.getHttpServer()).post('/api/stock-documents/finished-outbound').set(auth(production)).send({lines:[{itemId:ids['FG-001'],quantity:'1'}]}).expect(403);
+  });
+  it('原材料逐行审批支持重试与并发保护且旧整单接口不能重复过账',async()=>{
+    process.env.BATCH_INBOUND_ENABLED='true';
+    const beforeM1=await balanceOf('RAW','M-001');const beforeM2=await balanceOf('RAW','M-002');
+    const draft=await request(app.getHttpServer()).post('/api/stock-documents/material-inbound').set(auth(warehouse)).send({lines:[{itemId:ids['M-001'],quantity:'2'},{itemId:ids['M-002'],quantity:'3'}]}).expect(201);
+    await request(app.getHttpServer()).post(`/api/stock-documents/${draft.body.data.id}/submit`).set(auth(warehouse)).send({}).expect(201);
+    const detail=(await request(app.getHttpServer()).get(`/api/stock-documents/${draft.body.data.id}`).set(auth(admin)).expect(200)).body.data;
+    const [first,second]=detail.lines;
+    const bad=await request(app.getHttpServer()).post(`/api/approvals/${draft.body.data.id}/approve-lines`).set(auth(admin)).set('Idempotency-Key','test-invalid').send({decisions:[{lineId:first.id,decision:'APPROVED',quantity:'2'}]});
+    expect(bad.status).toBe(400);
+    const decision={lineId:first.id,decision:'APPROVE',quantity:'2',locationId:first.locationId};
+    const once=await request(app.getHttpServer()).post(`/api/approvals/${draft.body.data.id}/approve-lines`).set(auth(admin)).set('Idempotency-Key','pr5-line-one').send({decisions:[decision]}).expect(201);
+    const retry=await request(app.getHttpServer()).post(`/api/approvals/${draft.body.data.id}/approve-lines`).set(auth(admin)).set('Idempotency-Key','pr5-line-one').send({decisions:[decision]}).expect(201);
+    expect(retry.body.data).toEqual(once.body.data);
+    expect(await balanceOf('RAW','M-001')).toBe(String(Number(beforeM1)+2));
+    expect(await balanceOf('RAW','M-002')).toBe(beforeM2);
+    await request(app.getHttpServer()).post(`/api/approvals/${draft.body.data.id}/approve`).set(auth(admin)).set('Idempotency-Key','test-legacy').send(await approvalPayload(draft.body.data.id)).expect(400);
+    const secondDecision={lineId:second.id,decision:'APPROVE',quantity:'3',locationId:second.locationId};
+    const concurrent=await Promise.all([
+      request(app.getHttpServer()).post(`/api/approvals/${draft.body.data.id}/approve-lines`).set(auth(admin)).set('Idempotency-Key','pr5-line-two-a').send({decisions:[secondDecision]}),
+      request(app.getHttpServer()).post(`/api/approvals/${draft.body.data.id}/approve-lines`).set(auth(admin)).set('Idempotency-Key','pr5-line-two-b').send({decisions:[secondDecision]}),
+    ]);
+    expect(concurrent.filter(response=>response.status===201)).toHaveLength(1);
+    expect(concurrent.filter(response=>response.status===400)).toHaveLength(1);
+    expect(await balanceOf('RAW','M-002')).toBe(String(Number(beforeM2)+3));
+    const final=(await request(app.getHttpServer()).get(`/api/stock-documents/${draft.body.data.id}`).set(auth(admin)).expect(200)).body.data;
+    expect(final.status).toBe('POSTED');
+    expect(final.lines.map((line:any)=>line.reviewStatus)).toEqual(['POSTED','POSTED']);
+    await request(app.getHttpServer()).post(`/api/stock-documents/${draft.body.data.id}/void`).set(auth(warehouse)).set('Idempotency-Key','pr5-line-review-cleanup').send({reason:'隔离验收结束后恢复测试基线'}).expect(201);
+    expect(await balanceOf('RAW','M-001')).toBe(beforeM1);
+    expect(await balanceOf('RAW','M-002')).toBe(beforeM2);
+  });
+  it('批量入库合并同库位重复行并以幂等键避免重复建单',async()=>{
+    process.env.BATCH_INBOUND_ENABLED='true';
+    const [target]=await db.query(`SELECT w.warehouse_code warehouse,z.code zone,l.code location FROM warehouses w JOIN warehouse_zones z ON z.warehouse_id=w.id JOIN warehouse_locations l ON l.zone_id=z.id WHERE w.warehouse_type='RAW' AND w.status='ACTIVE' AND z.status='ACTIVE' AND l.status='ACTIVE' AND l.is_archived=false ORDER BY w.warehouse_code,z.code,l.code LIMIT 1`);
+    const workbook=new Workbook();const sheet=workbook.addWorksheet('批量入库');
+    sheet.addRow(['物料编码','类别','产品名称','规格','数量','单位','所属仓库','库区','库位','备注','批次']);
+    sheet.addRow(['M-003','螺丝','螺丝','','2','个',target.warehouse,target.zone,target.location,'批量验收','']);
+    sheet.addRow(['M-003','螺丝','螺丝','','3','个',target.warehouse,target.zone,target.location,'批量验收','']);
+    const file=Buffer.from(await workbook.xlsx.writeBuffer());
+    const post=()=>request(app.getHttpServer()).post('/api/stock-documents/material-inbound/batch-import').set(auth(warehouse)).set('Idempotency-Key','pr5-batch-import-retry').attach('file',file,'batch.xlsx');
+    const first=await post().expect(201);const retry=await post().expect(201);
+    expect(retry.body.data).toEqual(first.body.data);
+    expect(first.body.data).toMatchObject({totalCount:2,successCount:2,failureCount:0,warningCount:1,documents:[{lineCount:1}]});
+    const document=first.body.data.documents[0];
+    const detail=(await request(app.getHttpServer()).get(`/api/stock-documents/${document.id}`).set(auth(admin)).expect(200)).body.data;
+    expect(detail.lines).toHaveLength(1);expect(detail.lines[0].quantity).toBe('5');
+    await request(app.getHttpServer()).delete(`/api/stock-documents/${document.id}`).set(auth(warehouse)).expect(200);
+  });
+  it('逐行审批支持正常品与不良品分配并记录库存流水和审核审计',async()=>{
+    process.env.BATCH_INBOUND_ENABLED='true';
+    const beforeNormal=await balanceOf('RAW','M-003');
+    const draft=await request(app.getHttpServer()).post('/api/stock-documents/material-inbound').set(auth(warehouse))
+      .send({lines:[{itemId:ids['M-003'],quantity:'2'}]}).expect(201);
+    await request(app.getHttpServer()).post(`/api/stock-documents/${draft.body.data.id}/submit`).set(auth(warehouse)).send({}).expect(201);
+    const detail=(await request(app.getHttpServer()).get(`/api/approvals/${draft.body.data.id}`).set(auth(admin)).expect(200)).body.data;
+    const [line]=detail.lines;
+    const normal=detail.allocationOptions.find((row:any)=>row.warehouseType==='RAW');
+    const defective=detail.allocationOptions.find((row:any)=>row.warehouseType==='DEFECTIVE');
+    await request(app.getHttpServer()).post(`/api/approvals/${draft.body.data.id}/approve-lines`).set(auth(admin))
+      .set('Idempotency-Key','pr5-line-defective-split').send({
+        decisions:[{lineId:line.id,decision:'APPROVE',quantity:'2',locationId:line.locationId}],
+        receiptAllocations:[
+          {documentLineId:line.id,disposition:'NORMAL',warehouseId:normal.warehouseId,locationId:normal.locationId,quantity:'1'},
+          {documentLineId:line.id,disposition:'DEFECTIVE',warehouseId:defective.warehouseId,locationId:defective.locationId,quantity:'1',defectReason:'隔离验收不良品'},
+        ],
+      }).expect(201);
+    expect(await balanceOf('RAW','M-003')).toBe(String(Number(beforeNormal)+1));
+    const [lot]=await db.query(`SELECT received_qty,remaining_qty,defect_reason FROM defective_inventory_lots WHERE source_document_id=$1`,[draft.body.data.id]);
+    expect(lot).toEqual({received_qty:'1',remaining_qty:'1',defect_reason:'隔离验收不良品'});
+    const flows=await db.query(`SELECT delta_qty FROM stock_transactions WHERE source_document_id=$1 ORDER BY delta_qty`,[draft.body.data.id]);
+    expect(flows.map((row:any)=>row.delta_qty)).toEqual(['1','1']);
+    const history=(await request(app.getHttpServer()).get(`/api/approvals/${draft.body.data.id}/history`).set(auth(admin)).expect(200)).body.data;
+    expect(history.some((row:any)=>row.action==='APPROVED'&&row.statusAfter==='POSTED')).toBe(true);
+  });
+  it('逐行驳回不改库存，修改后重新提交可正常过账',async()=>{
+    process.env.BATCH_INBOUND_ENABLED='true';
+    const before=await balanceOf('RAW','M-001');
+    const draft=await request(app.getHttpServer()).post('/api/stock-documents/material-inbound').set(auth(warehouse)).send({lines:[{itemId:ids['M-001'],quantity:'1'}]}).expect(201);
+    await request(app.getHttpServer()).post(`/api/stock-documents/${draft.body.data.id}/submit`).set(auth(warehouse)).send({}).expect(201);
+    const [line]=((await request(app.getHttpServer()).get(`/api/stock-documents/${draft.body.data.id}`).set(auth(admin)).expect(200)).body.data.lines);
+    const rejected=await request(app.getHttpServer()).post(`/api/approvals/${draft.body.data.id}/approve-lines`).set(auth(admin)).set('Idempotency-Key','pr5-line-reject').send({decisions:[{lineId:line.id,decision:'REJECT',reason:'库位待确认'}]}).expect(201);
+    expect(rejected.body.data.status).toBe('REJECTED');
+    expect(await balanceOf('RAW','M-001')).toBe(before);
+    await request(app.getHttpServer()).post(`/api/stock-documents/${draft.body.data.id}/submit`).set(auth(warehouse)).send({}).expect(201);
+    const resubmitted=(await request(app.getHttpServer()).get(`/api/stock-documents/${draft.body.data.id}`).set(auth(admin)).expect(200)).body.data;
+    expect(resubmitted.lines[0].reviewStatus).toBe('PENDING');
+    await request(app.getHttpServer()).post(`/api/approvals/${draft.body.data.id}/approve-lines`).set(auth(admin)).set('Idempotency-Key','pr5-line-resubmit-approve').send({decisions:[{lineId:line.id,decision:'APPROVE',quantity:'1',locationId:line.locationId}]}).expect(201);
+    expect(await balanceOf('RAW','M-001')).toBe(String(Number(before)+1));
+    await request(app.getHttpServer()).post(`/api/stock-documents/${draft.body.data.id}/void`).set(auth(warehouse)).set('Idempotency-Key','pr5-line-resubmit-cleanup').send({reason:'隔离验收结束后恢复测试基线'}).expect(201);
+    expect(await balanceOf('RAW','M-001')).toBe(before);
   });
   it('已过账单据冲销生成反向流水且恢复余额',async()=>{
     const draft=await request(app.getHttpServer()).post('/api/stock-documents/material-inbound').set(auth(warehouse)).send({lines:[{itemId:ids['M-001'],quantity:'5'}]}).expect(201);

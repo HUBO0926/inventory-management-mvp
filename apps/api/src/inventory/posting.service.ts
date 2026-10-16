@@ -82,11 +82,16 @@ export class InventoryPostingService {
 
   async applyDocument(qr: QueryRunner, documentId: string, userId: string, allowedStatuses = ['SUBMITTED'], options: { lineIds?: string[]; finalizeHeader?: boolean } = {}) {
     const partial = Array.isArray(options.lineIds) && options.lineIds.length > 0;
-    const lineFilter = partial ? `AND l.id = ANY($2::uuid[])` : '';
+    const lineFilter = partial ? `AND l.id = ANY($2::uuid[]) AND l.review_status='PENDING'` : '';
     const [doc] = await qr.query(`SELECT d.*,w.warehouse_code,w.warehouse_type FROM stock_documents d JOIN warehouses w ON w.id=d.warehouse_id WHERE d.id=$1 FOR UPDATE`, [documentId]);
     if (!doc) throw new BusinessException('NOT_FOUND', '库存单据不存在'); if (!allowedStatuses.includes(doc.status)) throw new BusinessException('INVALID_STATUS', '当前单据状态不能过账');
+    if (!partial && doc.document_type === DocumentType.MATERIAL_INBOUND) {
+      const [processed] = await qr.query("SELECT 1 FROM stock_document_lines WHERE document_id=$1 AND review_status<>'PENDING' LIMIT 1", [documentId]);
+      if (processed) throw new BusinessException('INVALID_STATUS', '单据存在已处理明细，请使用逐行审批处理剩余明细');
+    }
     if (doc.document_type === DocumentType.STOCK_CHECK) return this.applyStockCheck(qr, doc, userId);
     const lines = await qr.query(`SELECT l.*,i.item_code,i.name item_name,i.item_type,i.status item_status,loc.warehouse_id location_warehouse_id,b.item_id batch_item_id,wsrc.warehouse_type source_warehouse_type FROM stock_document_lines l JOIN items i ON i.id=l.item_id JOIN warehouse_locations loc ON loc.id=l.location_id LEFT JOIN warehouses wsrc ON wsrc.id=COALESCE(l.source_warehouse_id,loc.warehouse_id) LEFT JOIN inventory_batches b ON b.id=l.batch_id WHERE l.document_id=$1 ${lineFilter} ORDER BY COALESCE(l.source_warehouse_id,loc.warehouse_id),l.location_id,l.item_id,l.batch_id NULLS FIRST`, partial ? [documentId, options.lineIds] : [documentId]);
+    if (partial && (new Set(options.lineIds).size !== options.lineIds!.length || lines.length !== options.lineIds!.length)) throw new BusinessException('INVALID_STATUS', '明细已处理或不属于当前单据');
     if (!lines.length) throw new BusinessException('VALIDATION_ERROR', '单据没有明细'); this.validateWarehouseAndItems(doc, lines);
     await this.operations?.assertOperationAllowed(qr, lines.flatMap((line: any) => [line.location_id,line.target_location_id]), lines.flatMap((line: any) => line.target_location_id ? [{ locationId: line.target_location_id,itemId: line.item_id }] : line.direction===Direction.IN ? [{ locationId: line.location_id,itemId: line.item_id }] : []));
     const postedLines: any[] = [];
@@ -101,7 +106,7 @@ export class InventoryPostingService {
     } else if (doc.document_type === DocumentType.REVERSAL) {
       for (const line of lines) postedLines.push(await this.postLine(qr, documentId, userId, line, line.target_warehouse_id || doc.warehouse_id, line.location_id, line.batch_id, line.direction, doc.document_type));
     } else {
-      const allocations = !partial && [DocumentType.MATERIAL_INBOUND, DocumentType.FINISHED_INBOUND, DocumentType.PRODUCTION_RETURN, DocumentType.PRODUCTION_COMPLETION].includes(doc.document_type) ? await qr.query(`SELECT a.*,l.item_id FROM stock_document_receipt_allocations a JOIN stock_document_lines l ON l.id=a.document_line_id WHERE l.document_id=$1 ORDER BY a.warehouse_id,a.location_id,a.id`, [documentId]) : [];
+      const allocations = [DocumentType.MATERIAL_INBOUND, DocumentType.FINISHED_INBOUND, DocumentType.PRODUCTION_RETURN, DocumentType.PRODUCTION_COMPLETION].includes(doc.document_type) ? await qr.query(`SELECT a.*,l.item_id FROM stock_document_receipt_allocations a JOIN stock_document_lines l ON l.id=a.document_line_id WHERE l.document_id=$1 ${lineFilter} ORDER BY a.warehouse_id,a.location_id,a.id`, partial ? [documentId, options.lineIds] : [documentId]) : [];
       if (allocations.length) {
         for (const line of lines) {
           const rows = allocations.filter((row: any) => row.document_line_id === line.id); const total = rows.reduce((sum: Decimal, row: any) => sum.add(row.quantity), new Decimal(0));
@@ -120,8 +125,8 @@ export class InventoryPostingService {
     if (partial) await this.reservations.consumeLines(qr, documentId, options.lineIds!);
     else await this.reservations.consumeDocument(qr, documentId);
     await this.operations?.refreshInventoryAlerts(qr,[doc.warehouse_id,...lines.map((line:any)=>line.target_warehouse_id).filter(Boolean)]);
-    if (partial) {
-      await qr.query(`UPDATE stock_document_lines SET review_status='POSTED',reviewed_by=$1,reviewed_at=now() WHERE id=ANY($2::uuid[])`, [userId, options.lineIds]);
+    if (doc.document_type === DocumentType.MATERIAL_INBOUND) {
+      await qr.query(`UPDATE stock_document_lines SET review_status='POSTED',reviewed_by=$1,reviewed_at=now() WHERE document_id=$3 AND id=ANY($2::uuid[])`, [userId, lines.map((line:any)=>line.id), documentId]);
     }
     if (options.finalizeHeader === false) {
       await this.audit.log(userId, 'POST_STOCK_DOCUMENT', 'stock_documents', documentId, { documentType: doc.document_type, partial: true, lineIds: options.lineIds, lines: postedLines }, qr.manager);

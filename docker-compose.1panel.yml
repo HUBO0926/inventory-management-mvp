@@ -31,6 +31,8 @@ services:
       INITIAL_DEMO_PASSWORD: ${INITIAL_DEMO_PASSWORD:?INITIAL_DEMO_PASSWORD is required}
       API_PORT: 3001
       UPLOAD_ROOT: ${UPLOAD_ROOT:-/app/uploads}
+      BATCH_INBOUND_ENABLED: ${BATCH_INBOUND_ENABLED:-false}
+    command: ["node", "dist/main.js"]
     volumes:
       - inventory_1panel_uploads:/app/uploads
     depends_on:
