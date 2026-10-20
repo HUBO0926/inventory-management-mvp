@@ -260,4 +260,3 @@ check_window
 [[ "$(docker inspect -f '{{.Id}}' "$DB_CONTAINER")" == "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["runtime"]["db_container_id"])' "$GATE_FILE")" ]] || die "inventory database container changed during release"
 [[ "$(docker inspect -f '{{.State.Status}}' "$WEB_CONTAINER")" == running ]] || die "inventory Web container is not running"
 log "v1.9.0 deployed. API image id=$(docker inspect -f '{{.Image}}' "$API_CONTAINER"); Web image id=$(docker inspect -f '{{.Image}}' "$WEB_CONTAINER"). Verify site/API and related stacks in 1Panel."
-
